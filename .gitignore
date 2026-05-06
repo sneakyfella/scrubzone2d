@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+
+# VS / Rider
+.vs/
+.idea/
+*.user
+*.suo
+
+# MonoGame content pipeline
+*/Content/bin/
+*/Content/obj/
+
+# Environment
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db

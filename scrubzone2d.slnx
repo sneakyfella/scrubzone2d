@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/ScrubZone2D/ScrubZone2D.csproj" />
+  <Project Path="monogametemplate/MonoGameTemplate.csproj" />
+  <Project Path="networkinglib/src/NetworkingLib/NetworkingLib.csproj" />
+  <Project Path="matchmaker/MatchmakingLib/MatchmakingLib.csproj" />
+  <Project Path="monogameservices/MonoGameServices.csproj" />
+</Solution>

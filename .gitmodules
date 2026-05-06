@@ -1,0 +1,16 @@
+[submodule "monogametemplate"]
+	path = monogametemplate
+	url = https://github.com/sneakyfella/monogametemplate.git
+[submodule "networkinglib"]
+	path = networkinglib
+	url = https://github.com/sneakyfella/networkinglib.git
+[submodule "monogameservices"]
+	path = monogameservices
+	url = https://github.com/sneakyfella/monogameservices.git
+[submodule "monogamedeploy"]
+	path = monogamedeploy
+	url = https://github.com/sneakyfella/monogamedeploy.git
+[submodule "matchmaker"]
+	path = matchmaker
+	url = https://github.com/sneakyfella/matchmaker.git
+	branch = master
