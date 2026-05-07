@@ -117,9 +117,19 @@ public sealed class NetworkManager : IDisposable
             _matchmaker = new MatchmakingClient(MatchmakerIni);
             await _matchmaker.ConnectAsync(hostId);
 
+            // Leave first — same hostId is reused across sessions so a stale entry
+            // would cause a 409 AlreadyQueued and silently drop us from the queue.
+            await _matchmaker.LeaveQueueAsync();
+
             var player = new Player(hostId, playerName, 1000.0, hostId);
-            await _matchmaker.JoinQueueAsync(player, MatchmakingMode.Coop);
-            Post(() => StatusText = $"Matchmaker ready - share IP: {localIp}:{GamePort}");
+            bool joined = await _matchmaker.JoinQueueAsync(player, MatchmakingMode.Coop);
+            if (joined)
+                Post(() => StatusText = $"Matchmaker ready - share IP: {localIp}:{GamePort}");
+            else
+            {
+                var reason = _matchmaker.LastJoinFailureReason ?? "unknown";
+                Post(() => StatusText = $"Matchmaker join failed ({reason}) - use direct connect: {localIp}:{GamePort}");
+            }
         }
         catch
         {
