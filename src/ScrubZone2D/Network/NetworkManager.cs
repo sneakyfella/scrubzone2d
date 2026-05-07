@@ -100,7 +100,7 @@ public sealed class NetworkManager : IDisposable
             // Host enters lobby immediately — no need to wait for a joiner
             Post(() =>
             {
-                StatusText = $"Hosting — share IP: {localIp}:{GamePort}";
+                StatusText = $"Hosting - share IP: {localIp}:{GamePort}";
                 LobbyReady?.Invoke();
             });
         }
@@ -119,11 +119,11 @@ public sealed class NetworkManager : IDisposable
 
             var player = new Player(hostId, playerName, 1000.0, hostId);
             await _matchmaker.JoinQueueAsync(player, MatchmakingMode.Coop);
-            Post(() => StatusText = $"Matchmaker ready — share IP: {localIp}:{GamePort}");
+            Post(() => StatusText = $"Matchmaker ready - share IP: {localIp}:{GamePort}");
         }
         catch
         {
-            Post(() => StatusText = $"Matchmaker offline — share IP: {localIp}:{GamePort}");
+            Post(() => StatusText = $"Matchmaker offline - share IP: {localIp}:{GamePort}");
         }
     }
 
