@@ -18,46 +18,51 @@ public sealed class NetworkManager : IDisposable
 {
     public static readonly NetworkManager Instance = new();
 
-    public NetworkRole Role          { get; private set; } = NetworkRole.None;
-    public byte        LocalPlayerId { get; private set; }
+    public NetworkRole Role           { get; private set; } = NetworkRole.None;
+    public byte        LocalPlayerId  { get; private set; }
     public byte        RemotePlayerId { get; private set; }
-    public string      LocalName     { get; private set; } = "Player";
-    public string      RemoteName    { get; private set; } = "Remote";
-    public bool        IsConnected   { get; private set; }
-    public bool        GameStarted   { get; private set; }
-    public string?     StatusText    { get; private set; } = "Ready";
+    public string      LocalName      { get; private set; } = "Player";
+    public string      RemoteName     { get; private set; } = "Remote";
+    public bool        IsConnected    { get; private set; }
+    public bool        GameStarted    { get; private set; }
+    public string?     StatusText     { get; private set; } = "Ready";
+
+    // Lobby state
+    public GameMode GameMode        { get; private set; } = GameMode.FFA;
+    public bool     LocalIsReady    { get; private set; }
+    public bool     RemoteIsReady   { get; private set; }
+    // True when all joiners are ready (host perspective: requires connection + joiner ready)
+    public bool     AllJoinersReady => IsConnected && RemoteIsReady;
 
     // Raised on game thread via ProcessPendingActions
-    public event Action?           LobbyReady;
-    public event Action?           GameStarting;
-    public event Action<IPacket>?  GamePacketReceived;
-    public event Action?           Disconnected;
-    public event Action<string>?   StartFailed;
+    public event Action?          LobbyReady;
+    public event Action?          LobbyUpdated;
+    public event Action?          CountdownStarted;
+    public event Action?          GameStarting;
+    public event Action<IPacket>? GamePacketReceived;
+    public event Action?          Disconnected;
+    public event Action<string>?  StartFailed;
 
-    private UdpGameServer?    _server;
-    private UdpGameClient?    _client;
+    private UdpGameServer?     _server;
+    private UdpGameClient?     _client;
     private MatchmakingClient? _matchmaker;
-    private IPEndPoint?        _remoteEndpoint; // host tracks joiner endpoint
+    private IPEndPoint?        _remoteEndpoint;
 
-    // Thread-safe action queue — network callbacks enqueue, game Update dequeues
     private readonly ConcurrentQueue<Action> _pending = new();
-
-    // Monotonic tick counter for unreliable state packets
     private uint _tick;
 
-    // Matchmaking ini path — resolved relative to the executable directory
     private static readonly string MatchmakerIni =
         Path.Combine(AppContext.BaseDirectory, "matchmaking.ini");
-    private const int    GamePort      = 7777;
-    private const ushort Protocol      = 1;
+    private const int    GamePort = 7777;
+    private const ushort Protocol = 1;
 
     private NetworkManager()
     {
         NetworkLibSetup.RegisterBuiltinPackets();
         GamePacketRegistrar.RegisterAll();
+        LobbyPacketRegistrar.RegisterAll();
     }
 
-    // Called once per frame from Game1.Update to marshal network events to game thread
     public void ProcessPendingActions()
     {
         while (_pending.TryDequeue(out var action))
@@ -68,15 +73,22 @@ public sealed class NetworkManager : IDisposable
 
     public async Task StartHostAsync(string playerName)
     {
-        Role      = NetworkRole.Host;
-        LocalName = playerName;
+        Role          = NetworkRole.Host;
+        LocalName     = playerName;
+        LocalPlayerId = 0xFF;
+        GameMode      = GameMode.FFA;
+        LocalIsReady  = false;
+        RemoteIsReady = false;
+        GameStarted   = false;
+        IsConnected   = false;
+
         Post(() => StatusText = "Starting server...");
 
         string localIp;
         string hostId;
         try
         {
-            _server = new UdpGameServer(GamePort, maxClients: 1, Protocol);
+            _server = new UdpGameServer(GamePort, maxClients: 5, Protocol);
             _server.ClientConnected    += OnServerClientConnected;
             _server.ClientDisconnected += OnServerClientDisconnected;
             _server.PacketReceived     += OnServerPacketReceived;
@@ -84,7 +96,13 @@ public sealed class NetworkManager : IDisposable
 
             localIp = GetLocalIp();
             hostId  = $"{localIp}:{GamePort}";
-            Post(() => StatusText = $"Server up - ID: {hostId}");
+
+            // Host enters lobby immediately — no need to wait for a joiner
+            Post(() =>
+            {
+                StatusText = $"Hosting — share IP: {localIp}:{GamePort}";
+                LobbyReady?.Invoke();
+            });
         }
         catch (Exception ex)
         {
@@ -101,11 +119,11 @@ public sealed class NetworkManager : IDisposable
 
             var player = new Player(hostId, playerName, 1000.0, hostId);
             await _matchmaker.JoinQueueAsync(player, MatchmakingMode.Coop);
-            Post(() => StatusText = "Waiting for opponent...");
+            Post(() => StatusText = $"Matchmaker ready — share IP: {localIp}:{GamePort}");
         }
         catch
         {
-            Post(() => StatusText = $"Matchmaker offline - share your IP: {localIp}:{GamePort}");
+            Post(() => StatusText = $"Matchmaker offline — share IP: {localIp}:{GamePort}");
         }
     }
 
@@ -113,8 +131,12 @@ public sealed class NetworkManager : IDisposable
 
     public async Task StartJoinAsync(string playerName)
     {
-        Role      = NetworkRole.Joiner;
-        LocalName = playerName;
+        Role          = NetworkRole.Joiner;
+        LocalName     = playerName;
+        LocalIsReady  = false;
+        RemoteIsReady = false;
+        GameStarted   = false;
+        IsConnected   = false;
 
         var joinerId = Guid.NewGuid().ToString("N")[..8];
         Post(() => StatusText = "Connecting to matchmaker...");
@@ -144,22 +166,48 @@ public sealed class NetworkManager : IDisposable
         }
     }
 
-    // Skip matchmaker — connect directly to host IP (LAN / port-forward)
     public async Task StartDirectJoinAsync(string playerName, string hostIp, int port = GamePort)
     {
-        Role      = NetworkRole.Joiner;
-        LocalName = playerName;
+        Role          = NetworkRole.Joiner;
+        LocalName     = playerName;
+        LocalIsReady  = false;
+        RemoteIsReady = false;
+        GameStarted   = false;
+        IsConnected   = false;
+
         Post(() => StatusText = $"Connecting to {hostIp}:{port}...");
         await ConnectClientAsync(hostIp, port);
     }
 
-    public async Task ConnectDirectAsync(string hostIp, int port = GamePort)
+    // ── Lobby actions ────────────────────────────────────────────────────────
+
+    // Host: change game mode and broadcast to joiners
+    public void SetGameMode(GameMode mode)
     {
-        Post(() => StatusText = $"Connecting to {hostIp}:{port}...");
-        await ConnectClientAsync(hostIp, port);
+        if (Role != NetworkRole.Host) return;
+        GameMode = mode;
+        SendReliable(new GameModeSetPacket { Mode = (byte)mode });
+        Post(() => LobbyUpdated?.Invoke());
     }
 
-    // Host: start the game, broadcast GameStartPacket
+    // Joiner: toggle ready state and notify host
+    public void SetReady(bool ready)
+    {
+        if (Role != NetworkRole.Joiner) return;
+        LocalIsReady = ready;
+        SendReliable(new PlayerReadyPacket { IsReady = ready });
+    }
+
+    // Host: begin countdown (only when all joiners are ready)
+    public void BeginCountdown()
+    {
+        if (Role != NetworkRole.Host || !AllJoinersReady) return;
+        SendReliable(new CountdownPacket());
+        Post(() => CountdownStarted?.Invoke());
+    }
+
+    // ── Game start ───────────────────────────────────────────────────────────
+
     public void StartGame()
     {
         if (Role != NetworkRole.Host || !IsConnected) return;
@@ -202,13 +250,15 @@ public sealed class NetworkManager : IDisposable
         _remoteEndpoint = ep;
         RemotePlayerId  = info.PlayerId;
         RemoteName      = info.PlayerName;
-        LocalPlayerId   = 0xFF; // host uses 0xFF as convention
+
+        // Sync current lobby state to the new joiner
+        _server!.SendReliable(ep, new LobbySyncPacket { Mode = (byte)GameMode });
 
         Post(() =>
         {
             IsConnected = true;
             StatusText  = $"Player connected: {info.PlayerName}";
-            LobbyReady?.Invoke();
+            LobbyUpdated?.Invoke();
         });
     }
 
@@ -216,16 +266,25 @@ public sealed class NetworkManager : IDisposable
     {
         Post(() =>
         {
-            IsConnected = false;
-            StatusText  = "Player disconnected";
+            IsConnected   = false;
+            RemoteIsReady = false;
+            StatusText    = "Player disconnected";
             Disconnected?.Invoke();
         });
     }
 
     private void OnServerPacketReceived(IPEndPoint ep, IPacket packet)
     {
-        if (IsGamePacket(packet.PacketTypeId))
-            Post(() => GamePacketReceived?.Invoke(packet));
+        switch (packet)
+        {
+            case PlayerReadyPacket ready:
+                Post(() => { RemoteIsReady = ready.IsReady; LobbyUpdated?.Invoke(); });
+                break;
+            default:
+                if (IsGamePacket(packet.PacketTypeId))
+                    Post(() => GamePacketReceived?.Invoke(packet));
+                break;
+        }
     }
 
     // ── Client callbacks ─────────────────────────────────────────────────────
@@ -253,18 +312,34 @@ public sealed class NetworkManager : IDisposable
 
     private void OnClientPacketReceived(IPacket packet)
     {
-        if (packet is GameStartPacket)
+        switch (packet)
         {
-            Post(() =>
-            {
-                GameStarted = true;
-                RemotePlayerId = 0xFF; // host is always 0xFF
-                GameStarting?.Invoke();
-            });
-            return;
+            case GameStartPacket:
+                Post(() =>
+                {
+                    GameStarted    = true;
+                    RemotePlayerId = 0xFF;
+                    GameStarting?.Invoke();
+                });
+                break;
+
+            case LobbySyncPacket sync:
+                Post(() => { GameMode = (GameMode)sync.Mode; LobbyUpdated?.Invoke(); });
+                break;
+
+            case GameModeSetPacket modeSet:
+                Post(() => { GameMode = (GameMode)modeSet.Mode; LobbyUpdated?.Invoke(); });
+                break;
+
+            case CountdownPacket:
+                Post(() => CountdownStarted?.Invoke());
+                break;
+
+            default:
+                if (IsGamePacket(packet.PacketTypeId))
+                    Post(() => GamePacketReceived?.Invoke(packet));
+                break;
         }
-        if (IsGamePacket(packet.PacketTypeId))
-            Post(() => GamePacketReceived?.Invoke(packet));
     }
 
     // ── Matchmaking callback ─────────────────────────────────────────────────
@@ -274,7 +349,6 @@ public sealed class NetworkManager : IDisposable
         var allIds = string.Join(", ", e.Match.AllPlayerIds);
         Post(() => StatusText = $"Match found ({e.Match.AllPlayerIds.Count()} players): {allIds}");
 
-        // Host player ID format is "ip:port"
         var hostId = e.Match.AllPlayerIds.FirstOrDefault(id => id.Contains(':'));
         if (hostId == null)
         {
@@ -300,8 +374,8 @@ public sealed class NetworkManager : IDisposable
     {
         var config = new NetworkConfig
         {
-            PlayerName      = LocalName,
-            ProtocolVersion = Protocol,
+            PlayerName       = LocalName,
+            ProtocolVersion  = Protocol,
             ConnectTimeoutMs = 10_000
         };
         _client = new UdpGameClient(config);
