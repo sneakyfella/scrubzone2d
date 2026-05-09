@@ -29,6 +29,7 @@ public sealed class NetworkManager : IDisposable
 
     // Lobby state
     public GameMode GameMode        { get; private set; } = GameMode.FFA;
+    public byte     SelectedMap     { get; private set; } = 0;
     public bool     LocalIsReady    { get; private set; }
     public bool     RemoteIsReady   { get; private set; }
     // True when all joiners are ready (host perspective: requires connection + joiner ready)
@@ -77,6 +78,7 @@ public sealed class NetworkManager : IDisposable
         LocalName     = playerName;
         LocalPlayerId = 0xFF;
         GameMode      = GameMode.FFA;
+        SelectedMap   = 0;
         LocalIsReady  = false;
         RemoteIsReady = false;
         GameStarted   = false;
@@ -143,6 +145,7 @@ public sealed class NetworkManager : IDisposable
     {
         Role          = NetworkRole.Joiner;
         LocalName     = playerName;
+        SelectedMap   = 0;
         LocalIsReady  = false;
         RemoteIsReady = false;
         GameStarted   = false;
@@ -180,6 +183,7 @@ public sealed class NetworkManager : IDisposable
     {
         Role          = NetworkRole.Joiner;
         LocalName     = playerName;
+        SelectedMap   = 0;
         LocalIsReady  = false;
         RemoteIsReady = false;
         GameStarted   = false;
@@ -197,6 +201,15 @@ public sealed class NetworkManager : IDisposable
         if (Role != NetworkRole.Host) return;
         GameMode = mode;
         SendReliable(new GameModeSetPacket { Mode = (byte)mode });
+        Post(() => LobbyUpdated?.Invoke());
+    }
+
+    // Host: change map selection and broadcast to joiners
+    public void SetMap(byte mapId)
+    {
+        if (Role != NetworkRole.Host) return;
+        SelectedMap = mapId;
+        SendReliable(new MapSelectPacket { MapId = mapId });
         Post(() => LobbyUpdated?.Invoke());
     }
 
@@ -245,6 +258,12 @@ public sealed class NetworkManager : IDisposable
             _client!.SendUnreliable(pkt);
     }
 
+    public void SendInputUnreliable(JoinerInputPacket pkt)
+    {
+        if (Role == NetworkRole.Joiner)
+            _client!.SendUnreliable(pkt);
+    }
+
     public void SendReliable(IPacket pkt)
     {
         if (Role == NetworkRole.Host && _remoteEndpoint != null)
@@ -262,7 +281,7 @@ public sealed class NetworkManager : IDisposable
         RemoteName      = info.PlayerName;
 
         // Sync current lobby state to the new joiner
-        _server!.SendReliable(ep, new LobbySyncPacket { Mode = (byte)GameMode });
+        _server!.SendReliable(ep, new LobbySyncPacket { Mode = (byte)GameMode, MapId = SelectedMap });
 
         Post(() =>
         {
@@ -334,11 +353,15 @@ public sealed class NetworkManager : IDisposable
                 break;
 
             case LobbySyncPacket sync:
-                Post(() => { GameMode = (GameMode)sync.Mode; LobbyUpdated?.Invoke(); });
+                Post(() => { GameMode = (GameMode)sync.Mode; SelectedMap = sync.MapId; LobbyUpdated?.Invoke(); });
                 break;
 
             case GameModeSetPacket modeSet:
                 Post(() => { GameMode = (GameMode)modeSet.Mode; LobbyUpdated?.Invoke(); });
+                break;
+
+            case MapSelectPacket mapSelect:
+                Post(() => { SelectedMap = mapSelect.MapId; LobbyUpdated?.Invoke(); });
                 break;
 
             case CountdownPacket:

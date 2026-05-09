@@ -9,6 +9,7 @@ public static class LobbyPacketIds
     public const byte PlayerReady = 0x31;
     public const byte LobbySync   = 0x32;
     public const byte Countdown   = 0x33;
+    public const byte MapSelect   = 0x34;
 }
 
 // Host -> joiner: game mode changed
@@ -33,9 +34,19 @@ public sealed class PlayerReadyPacket : IPacket
 public sealed class LobbySyncPacket : IPacket
 {
     public byte PacketTypeId => LobbyPacketIds.LobbySync;
-    public byte Mode { get; set; }
-    public void Serialize(BinaryWriter w)   => w.Write(Mode);
-    public void Deserialize(BinaryReader r) => Mode = r.ReadByte();
+    public byte Mode  { get; set; }
+    public byte MapId { get; set; }
+    public void Serialize(BinaryWriter w)   { w.Write(Mode); w.Write(MapId); }
+    public void Deserialize(BinaryReader r) { Mode = r.ReadByte(); MapId = r.ReadByte(); }
+}
+
+// Host -> joiner: selected map changed
+public sealed class MapSelectPacket : IPacket
+{
+    public byte PacketTypeId => LobbyPacketIds.MapSelect;
+    public byte MapId { get; set; }
+    public void Serialize(BinaryWriter w)   => w.Write(MapId);
+    public void Deserialize(BinaryReader r) => MapId = r.ReadByte();
 }
 
 // Host -> joiner: countdown has started (game starting soon)
@@ -54,5 +65,6 @@ public static class LobbyPacketRegistrar
         PacketRegistry.Register(LobbyPacketIds.PlayerReady, () => new PlayerReadyPacket());
         PacketRegistry.Register(LobbyPacketIds.LobbySync,   () => new LobbySyncPacket());
         PacketRegistry.Register(LobbyPacketIds.Countdown,   () => new CountdownPacket());
+        PacketRegistry.Register(LobbyPacketIds.MapSelect,   () => new MapSelectPacket());
     }
 }

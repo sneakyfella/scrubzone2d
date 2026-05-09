@@ -10,10 +10,13 @@ public static class GamePacketIds
     public const byte FireProjectile      = 0x51;
     public const byte ProjectileDestroyed = 0x52;
     public const byte PlayerDamaged       = 0x53;
-    public const byte RoundOver           = 0x54;
+    public const byte ScoreUpdate         = 0x55;
+    public const byte PlayerRespawn       = 0x56;
+    public const byte JoinerInput         = 0x57;
+    public const byte ResumeCountdown     = 0x58;
 }
 
-// Sent unreliably ~20 Hz — position/velocity/angles for one hovercraft
+// Sent unreliably ~20 Hz — position/velocity/angles + shield for one hovercraft
 public sealed class HovercraftStatePacket : IPacket
 {
     public byte   PacketTypeId => GamePacketIds.HovercraftState;
@@ -24,13 +27,15 @@ public sealed class HovercraftStatePacket : IPacket
     public float  VelY         { get; set; }
     public float  BodyAngle    { get; set; }
     public float  TurretAngle  { get; set; }
+    public byte   Shield       { get; set; }
     public uint   Tick         { get; set; }
 
     public void Serialize(BinaryWriter w)
     {
         w.Write(PlayerId); w.Write(X); w.Write(Y);
         w.Write(VelX); w.Write(VelY);
-        w.Write(BodyAngle); w.Write(TurretAngle); w.Write(Tick);
+        w.Write(BodyAngle); w.Write(TurretAngle);
+        w.Write(Shield); w.Write(Tick);
     }
 
     public void Deserialize(BinaryReader r)
@@ -39,6 +44,7 @@ public sealed class HovercraftStatePacket : IPacket
         X           = r.ReadSingle(); Y = r.ReadSingle();
         VelX        = r.ReadSingle(); VelY = r.ReadSingle();
         BodyAngle   = r.ReadSingle(); TurretAngle = r.ReadSingle();
+        Shield      = r.ReadByte();
         Tick        = r.ReadUInt32();
     }
 }
@@ -53,12 +59,15 @@ public sealed class FireProjectilePacket : IPacket
     public float  OriginY       { get; set; }
     public float  VelX          { get; set; }
     public float  VelY          { get; set; }
+    public byte   WeaponType    { get; set; }
+    public int    Damage        { get; set; }
 
     public void Serialize(BinaryWriter w)
     {
         w.Write(OwnerPlayerId); w.Write(ProjectileId);
         w.Write(OriginX); w.Write(OriginY);
         w.Write(VelX); w.Write(VelY);
+        w.Write(WeaponType); w.Write(Damage);
     }
 
     public void Deserialize(BinaryReader r)
@@ -66,10 +75,11 @@ public sealed class FireProjectilePacket : IPacket
         OwnerPlayerId = r.ReadByte(); ProjectileId = r.ReadInt32();
         OriginX = r.ReadSingle(); OriginY = r.ReadSingle();
         VelX    = r.ReadSingle(); VelY    = r.ReadSingle();
+        WeaponType = r.ReadByte(); Damage = r.ReadInt32();
     }
 }
 
-// Sent reliably — remove a projectile (bounce limit or out of bounds)
+// Sent reliably — remove a projectile (bounce limit or wall hit)
 public sealed class ProjectileDestroyedPacket : IPacket
 {
     public byte PacketTypeId => GamePacketIds.ProjectileDestroyed;
@@ -79,38 +89,85 @@ public sealed class ProjectileDestroyedPacket : IPacket
     public void Deserialize(BinaryReader r) => ProjectileId = r.ReadInt32();
 }
 
-// Sent reliably — a player took damage
+// Sent reliably — a player took damage; attacker is authoritative
 public sealed class PlayerDamagedPacket : IPacket
 {
-    public byte PacketTypeId  => GamePacketIds.PlayerDamaged;
-    public byte TargetId      { get; set; }
-    public byte AttackerId    { get; set; }
-    public int  ProjectileId  { get; set; }
-    public int  Damage        { get; set; }
-    public int  RemainingHp   { get; set; }
+    public byte PacketTypeId    => GamePacketIds.PlayerDamaged;
+    public byte TargetId        { get; set; }
+    public byte AttackerId      { get; set; }
+    public int  ProjectileId    { get; set; }
+    public int  RemainingShield { get; set; }
+    public int  RemainingHull   { get; set; }
 
     public void Serialize(BinaryWriter w)
     {
         w.Write(TargetId); w.Write(AttackerId);
-        w.Write(ProjectileId); w.Write(Damage); w.Write(RemainingHp);
+        w.Write(ProjectileId); w.Write(RemainingShield); w.Write(RemainingHull);
     }
 
     public void Deserialize(BinaryReader r)
     {
-        TargetId    = r.ReadByte(); AttackerId   = r.ReadByte();
-        ProjectileId = r.ReadInt32(); Damage     = r.ReadInt32();
-        RemainingHp  = r.ReadInt32();
+        TargetId        = r.ReadByte(); AttackerId    = r.ReadByte();
+        ProjectileId    = r.ReadInt32();
+        RemainingShield = r.ReadInt32(); RemainingHull = r.ReadInt32();
     }
 }
 
-// Sent reliably — round ended
-public sealed class RoundOverPacket : IPacket
+// Sent reliably — score updated after a kill
+public sealed class ScoreUpdatePacket : IPacket
 {
-    public byte PacketTypeId => GamePacketIds.RoundOver;
-    public byte WinnerPlayerId { get; set; }
+    public byte PacketTypeId => GamePacketIds.ScoreUpdate;
+    public byte Score0       { get; set; }
+    public byte Score1       { get; set; }
 
-    public void Serialize(BinaryWriter w)   => w.Write(WinnerPlayerId);
-    public void Deserialize(BinaryReader r) => WinnerPlayerId = r.ReadByte();
+    public void Serialize(BinaryWriter w)   { w.Write(Score0); w.Write(Score1); }
+    public void Deserialize(BinaryReader r) { Score0 = r.ReadByte(); Score1 = r.ReadByte(); }
+}
+
+// Sent reliably — a player respawned at position
+public sealed class PlayerRespawnPacket : IPacket
+{
+    public byte  PacketTypeId => GamePacketIds.PlayerRespawn;
+    public byte  PlayerId     { get; set; }
+    public float X            { get; set; }
+    public float Y            { get; set; }
+
+    public void Serialize(BinaryWriter w)   { w.Write(PlayerId); w.Write(X); w.Write(Y); }
+    public void Deserialize(BinaryReader r) { PlayerId = r.ReadByte(); X = r.ReadSingle(); Y = r.ReadSingle(); }
+}
+
+// Sent unreliably every frame — joiner's movement input for host to drive joiner's physics
+public sealed class JoinerInputPacket : IPacket
+{
+    public byte  PacketTypeId => GamePacketIds.JoinerInput;
+    public float DirX       { get; set; }
+    public float DirY       { get; set; }
+    public float AimAngle   { get; set; }
+    public bool  RightHeld  { get; set; }
+    public float ChargeTime { get; set; }
+
+    public void Serialize(BinaryWriter w)
+    {
+        w.Write(DirX); w.Write(DirY); w.Write(AimAngle);
+        w.Write(RightHeld); w.Write(ChargeTime);
+    }
+
+    public void Deserialize(BinaryReader r)
+    {
+        DirX = r.ReadSingle(); DirY = r.ReadSingle();
+        AimAngle   = r.ReadSingle();
+        RightHeld  = r.ReadBoolean(); ChargeTime = r.ReadSingle();
+    }
+}
+
+// Sent reliably by host once per second during graceful resume countdown
+public sealed class ResumeCountdownPacket : IPacket
+{
+    public byte PacketTypeId => GamePacketIds.ResumeCountdown;
+    public byte SecondsLeft  { get; set; }
+
+    public void Serialize(BinaryWriter w)   => w.Write(SecondsLeft);
+    public void Deserialize(BinaryReader r) => SecondsLeft = r.ReadByte();
 }
 
 public static class GamePacketRegistrar
@@ -121,6 +178,9 @@ public static class GamePacketRegistrar
         PacketRegistry.Register(GamePacketIds.FireProjectile,      () => new FireProjectilePacket());
         PacketRegistry.Register(GamePacketIds.ProjectileDestroyed, () => new ProjectileDestroyedPacket());
         PacketRegistry.Register(GamePacketIds.PlayerDamaged,       () => new PlayerDamagedPacket());
-        PacketRegistry.Register(GamePacketIds.RoundOver,           () => new RoundOverPacket());
+        PacketRegistry.Register(GamePacketIds.ScoreUpdate,         () => new ScoreUpdatePacket());
+        PacketRegistry.Register(GamePacketIds.PlayerRespawn,       () => new PlayerRespawnPacket());
+        PacketRegistry.Register(GamePacketIds.JoinerInput,         () => new JoinerInputPacket());
+        PacketRegistry.Register(GamePacketIds.ResumeCountdown,     () => new ResumeCountdownPacket());
     }
 }

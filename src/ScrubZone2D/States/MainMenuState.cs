@@ -18,11 +18,14 @@ public sealed class MainMenuState : GameState
     private bool   _ipFocused;
     private bool   _busy;
 
-    private static readonly Color Accent    = new(80, 140, 220);
+    private static readonly Color Accent     = new(80, 140, 220);
     private static readonly Color PanelBg   = new(20, 22, 35);
     private static readonly Color BtnHost   = new(50, 130, 80);
     private static readonly Color BtnFind   = new(50, 80, 160);
     private static readonly Color BtnDirect = new(100, 60, 130);
+#if EDITOR
+    private static readonly Color BtnEditor = new(80, 55, 130);
+#endif
 
     private KeyboardState _prevKb;
 
@@ -69,7 +72,12 @@ public sealed class MainMenuState : GameState
             new Rectangle(0, 165, 1280, 36), new Color(140, 140, 160), small: true);
 
         const int panelW = 480;
-        var panel = new Rectangle((1280 - panelW) / 2, 210, panelW, 380);
+#if EDITOR
+        const int panelH = 440;
+#else
+        const int panelH = 380;
+#endif
+        var panel = new Rectangle((1280 - panelW) / 2, 210, panelW, panelH);
         UIRenderer.Panel(sb, panel, PanelBg, Accent);
 
         int px = panel.X + 24, pw = panelW - 48, py = panel.Y + 20;
@@ -102,6 +110,14 @@ public sealed class MainMenuState : GameState
 
             if (UIRenderer.Button(sb, "CONNECT DIRECT", new Rectangle(px, py, pw, 36), BtnDirect, Color.White))
             { _busy = true; _ = NetworkManager.Instance.StartDirectJoinAsync(SafeName(), _directIp.Trim()); }
+            py += 48;
+
+#if EDITOR
+            UIRenderer.DrawBorder(sb, new Rectangle(px, py, pw, 1), new Color(60, 60, 80), 1);
+            py += 12;
+            if (UIRenderer.Button(sb, "MAP EDITOR", new Rectangle(px, py, pw, 36), BtnEditor, Color.White))
+                _stateManager.Push(new MapEditorState(_stateManager));
+#endif
         }
         else
         {

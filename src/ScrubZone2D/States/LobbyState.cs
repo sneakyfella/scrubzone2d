@@ -2,6 +2,7 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using MonoGameTemplate.GameStates;
 using MonoGameTemplate.Rendering;
+using ScrubZone2D.Arena;
 using ScrubZone2D.Network;
 
 namespace ScrubZone2D.States;
@@ -76,7 +77,7 @@ public sealed class LobbyState : GameState
         UIRenderer.FillRect(sb, new Rectangle(0, 0, 1280, 720), new Color(10, 10, 20));
         UIRenderer.TextCentered(sb, "LOBBY", new Rectangle(0, 44, 1280, 60), new Color(220, 200, 100));
 
-        const int panelW = 540, panelH = 490;
+        const int panelW = 540, panelH = 570;
         var panel = new Rectangle((1280 - panelW) / 2, 118, panelW, panelH);
         UIRenderer.Panel(sb, panel, PanelBg, Accent);
 
@@ -99,6 +100,43 @@ public sealed class LobbyState : GameState
             net.SetGameMode(GameMode.Teams);
 
         py += 52;
+
+        UIRenderer.DrawBorder(sb, new Rectangle(px, py, pw, 1), SepColor, 1);
+        py += 18;
+
+        // ── Map Selection ──────────────────────────────────────────────────────
+        UIRenderer.Text(sb, "MAP", new Vector2(px, py), Color.Gray, small: true);
+        py += 26;
+
+        int mapCount = MapRegistry.Maps.Count;
+        if (mapCount == 0)
+        {
+            UIRenderer.Text(sb, "No maps found in Maps/ folder.", new Vector2(px, py),
+                Color.Gray, small: true);
+            py += 20;
+        }
+        else
+        {
+            // Up to 2 maps per row; buttons generated from registry.
+            int numRows = (mapCount + 1) / 2;
+            for (int mi = 0; mi < mapCount; mi++)
+            {
+                int col    = mi % 2;
+                int row    = mi / 2;
+                int bx     = col == 0 ? px : px + halfW + 8;
+                int by     = py + row * 44;
+                int bw     = mapCount == 1 ? pw : halfW;
+                var mapCol = net.SelectedMap == mi ? BtnModeActive : BtnModeDim;
+
+                if (UIRenderer.Button(sb, MapRegistry.NameOf((byte)mi),
+                        new Rectangle(bx, by, bw, 36), mapCol, Color.White)
+                    && isHost && !_countdownActive)
+                    net.SetMap((byte)mi);
+            }
+            py += numRows * 44;
+        }
+
+        py += 8; // gap before separator
 
         UIRenderer.DrawBorder(sb, new Rectangle(px, py, pw, 1), SepColor, 1);
         py += 18;

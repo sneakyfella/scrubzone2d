@@ -37,6 +37,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>matchmaking.ini</Link>
     </Content>
+    <Content Include="Maps\*.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);EDITOR</DefineConstants>
+  </PropertyGroup>
 
 </Project>
