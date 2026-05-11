@@ -12,6 +12,7 @@ using MonoGameTemplate.Rendering;
 using MonoGameTemplate.Tweening;
 using MonoGameTemplate.UI.Framework;
 using ScrubZone2D.Arena;
+using ScrubZone2D.Config;
 using ScrubZone2D.States;
 #if !SHIPPING
 using MonoGameTemplate.DevConsole;
@@ -117,6 +118,7 @@ public sealed class Game1 : Game
         try { smallFont = Content.Load<SpriteFont>("Fonts/SmallFont");   } catch { }
 
         MapRegistry.Load(Path.Combine(AppContext.BaseDirectory, "Maps"));
+        GameConfig.Load(Path.Combine(AppContext.BaseDirectory, "gameconfig.json"));
 
         MGT.Init(pixel, font, smallFont);
 

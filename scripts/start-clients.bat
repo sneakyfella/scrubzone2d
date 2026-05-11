@@ -21,6 +21,7 @@ if %IDX% GTR %COUNT% goto done
 echo   Launching Player%IDX%
 start "" "%EXE%" --name Player%IDX%
 set /a IDX+=1
+if %IDX% LEQ %COUNT% timeout /t 2 /nobreak >nul
 goto launch
 
 :done

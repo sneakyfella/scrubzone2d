@@ -4,6 +4,7 @@ using Microsoft.Xna.Framework.Input;
 using MonoGameTemplate;
 using MonoGameTemplate.Input;
 using MonoGameTemplate.Rendering;
+using ScrubZone2D.Config;
 using ScrubZone2D.Network;
 using ScrubZone2D.Physics;
 using XnaVec = Microsoft.Xna.Framework.Vector2;
@@ -13,21 +14,28 @@ namespace ScrubZone2D.Entities;
 public sealed class HovercraftEntity
 {
     public const float Radius           = 18f;
-    public const float ThrustForce      = 320f;
-    public const float RotateSpeed      = 3.2f;
-    public const float MaxSpeedPx       = 380f;
-    public const float FireCooldown     = 0.45f;
-    public const float ProjectileSpd    = 520f;
-    public const float TurretLen        = 30f;
-    public const int   MaxShield        = 75;
-    public const float ShieldRegenRate  = 20f;  // points/s
-    public const float ShieldRegenDelay = 3f;   // seconds after last damage
-    public const float MaxChargeTime    = 2f;
-    public const float MinChargeToFire  = 0.4f;
-    public const float LaserSpeed       = 1400f;
-    public const int   MinLaserDamage   = 15;
-    public const int   MaxLaserDamage   = 55;
-    public const int   KineticDamage    = 25;
+    public static float ThrustForce           => GameConfig.Current.Ship.ThrustForce;
+    public static float RotateSpeed           => GameConfig.Current.Ship.RotateSpeed;
+    public static float MaxSpeedPx            => GameConfig.Current.Ship.MaxSpeedPx;
+    public static float FireCooldown          => GameConfig.Current.Kinetic.FireCooldown;
+    public static float ProjectileSpd         => LaserSpeed * GameConfig.Current.Kinetic.SpeedFactor;
+    public static float TurretLen             => GameConfig.Current.Ship.TurretLen;
+    public static int   MaxShield             => GameConfig.Current.Ship.MaxShield;
+    public static float ShieldRegenRate       => GameConfig.Current.Ship.ShieldRegenRate;
+    public static float ShieldRegenDelay      => GameConfig.Current.Ship.ShieldRegenDelay;
+    public static float MaxChargeTime         => GameConfig.Current.Laser.MaxChargeTime;
+    public static float MinChargeToFire       => GameConfig.Current.Laser.MinChargeTime;
+    public static float LaserSpeed            => GameConfig.Current.Laser.Speed;
+    public static int   MinLaserDamage        => GameConfig.Current.Laser.MinDamage;
+    public static int   MaxLaserDamage        => GameConfig.Current.Laser.MaxDamage;
+    public static int   KineticDamage         => GameConfig.Current.Kinetic.Damage;
+    public static float KineticBlastRadius    => GameConfig.Current.Kinetic.BlastRadius;
+    public static float KineticBlastImpulsePx => GameConfig.Current.Kinetic.BlastImpulsePx;
+    public static float OrbSpeed              => GameConfig.Current.LaserOrb.Speed;
+    public static float OrbBlastRadius        => GameConfig.Current.LaserOrb.BlastRadius;
+    public static float OrbBlastImpulsePx     => GameConfig.Current.LaserOrb.BlastImpulsePx;
+    public static float OrbTriggerRadius      => GameConfig.Current.LaserOrb.TriggerRadius;
+    public static int   OrbEmpDamage          => GameConfig.Current.LaserOrb.EmpDamage;
 
     public byte   PlayerId    { get; }
     public bool   IsLocal     { get; }
@@ -50,8 +58,52 @@ public sealed class HovercraftEntity
     private float _chargeTime;
     private int   _nextProjId = 1;
 
-    // Raised on fire: (projId, origin, velocity, weaponType, damage)
-    public event Action<int, XnaVec, XnaVec, WeaponType, int>? OnFire;
+    private readonly List<(DebuffType Type, float TimeLeft)> _debuffs = new();
+
+    public float ChargeTime  => _chargeTime;
+
+    public float EffectiveMaxSpeedPx =>
+        HasDebuff(DebuffType.EmpSlow)
+            ? MaxSpeedPx * GameConfig.Current.Ship.EmpSlowFactor
+            : MaxSpeedPx;
+
+    public bool HasDebuff(DebuffType type) => _debuffs.Any(d => d.Type == type);
+
+    public void ApplyDebuff(DebuffType type, float duration)
+    {
+        for (int i = 0; i < _debuffs.Count; i++)
+        {
+            if (_debuffs[i].Type != type) continue;
+            if (duration > _debuffs[i].TimeLeft) _debuffs[i] = (type, duration);
+            return;
+        }
+        _debuffs.Add((type, duration));
+    }
+
+    public void UpdateDebuffs(float dt)
+    {
+        for (int i = _debuffs.Count - 1; i >= 0; i--)
+        {
+            var (t, tl) = _debuffs[i];
+            if (tl - dt <= 0f) _debuffs.RemoveAt(i);
+            else               _debuffs[i] = (t, tl - dt);
+        }
+    }
+
+    // Stage 0-3: 2-5 bounces; stage 4: LaserOrb mode
+    public int ChargeStage
+    {
+        get
+        {
+            if (_chargeTime < MinChargeToFire) return 0;
+            float frac = Math.Clamp(
+                (_chargeTime - MinChargeToFire) / (MaxChargeTime - MinChargeToFire), 0f, 1f);
+            return frac >= 1f ? 4 : (int)(frac * 4f);
+        }
+    }
+
+    // Raised on fire: (projId, origin, velocity, weaponType, damage, maxBounces)
+    public event Action<int, XnaVec, XnaVec, WeaponType, int, int>? OnFire;
 
     public HovercraftEntity(byte playerId, bool isLocal, Color hullColor, PhysicsBody physicsBody)
     {
@@ -82,6 +134,7 @@ public sealed class HovercraftEntity
         _shieldRegen      = 0f;
         _chargeTime       = 0f;
         _fireCooldown     = 0f;
+        _debuffs.Clear();
         PhysicsBody.SetTransform(PhysicsWorld.ToB2(pos), 0f);
         PhysicsBody.SetLinearVelocity(PhysicsWorld.ToB2(XnaVec.Zero));
     }
@@ -94,7 +147,7 @@ public sealed class HovercraftEntity
         _shieldRegen      = 0f;
     }
 
-    public void UpdateLocal(float dt, InputHandler input)
+    public void UpdateLocal(float dt, InputHandler input, XnaVec worldMousePos)
     {
         if (!IsAlive || !InputHelper.IsActive) return;
 
@@ -129,12 +182,11 @@ public sealed class HovercraftEntity
 
         var vel = PhysicsBody.GetLinearVelocity();
         float spd = vel.Length();
-        if (spd > PhysicsWorld.ToM(MaxSpeedPx))
-            PhysicsBody.SetLinearVelocity(vel / spd * PhysicsWorld.ToM(MaxSpeedPx));
+        if (spd > PhysicsWorld.ToM(EffectiveMaxSpeedPx))
+            PhysicsBody.SetLinearVelocity(vel / spd * PhysicsWorld.ToM(EffectiveMaxSpeedPx));
 
-        var mousePos = input.VirtualPositionF;
-        var pos      = Position;
-        TurretAngle  = MathF.Atan2(mousePos.Y - pos.Y, mousePos.X - pos.X);
+        var pos     = Position;
+        TurretAngle = MathF.Atan2(worldMousePos.Y - pos.Y, worldMousePos.X - pos.X);
 
         // Left click: kinetic (instant, has cooldown)
         if (InputHelper.IsMouseClicked() && _fireCooldown <= 0f)
@@ -142,7 +194,7 @@ public sealed class HovercraftEntity
 
         // Right click: hold to charge, release to fire laser
         if (InputHelper.IsMouseDown(1))
-            _chargeTime += dt;
+            _chargeTime += dt * GameConfig.Current.Laser.ChargeRate;
 
         if (InputHelper.IsMouseReleased(1))
         {
@@ -164,8 +216,8 @@ public sealed class HovercraftEntity
         }
         var vel = PhysicsBody.GetLinearVelocity();
         float spd = vel.Length();
-        if (spd > PhysicsWorld.ToM(MaxSpeedPx))
-            PhysicsBody.SetLinearVelocity(vel / spd * PhysicsWorld.ToM(MaxSpeedPx));
+        if (spd > PhysicsWorld.ToM(EffectiveMaxSpeedPx))
+            PhysicsBody.SetLinearVelocity(vel / spd * PhysicsWorld.ToM(EffectiveMaxSpeedPx));
         TurretAngle = input.AimAngle;
 
         // Mirror shield regen on host for joiner entity
@@ -242,18 +294,31 @@ public sealed class HovercraftEntity
         var pos = Position;
         var dir = new XnaVec(MathF.Cos(TurretAngle), MathF.Sin(TurretAngle));
         var tip = pos + dir * (Radius + TurretLen);
-        OnFire?.Invoke(_nextProjId++, tip, dir * ProjectileSpd, WeaponType.Kinetic, KineticDamage);
+        OnFire?.Invoke(_nextProjId++, tip, dir * ProjectileSpd, WeaponType.Kinetic, KineticDamage, 1);
     }
 
     private void FireLaser()
     {
-        float chargeFraction = Math.Clamp(
+        float frac = Math.Clamp(
             (_chargeTime - MinChargeToFire) / (MaxChargeTime - MinChargeToFire), 0f, 1f);
-        int damage = MinLaserDamage + (int)(chargeFraction * (MaxLaserDamage - MinLaserDamage));
+        int stage = frac >= 1f ? 4 : (int)(frac * 4f);
+
+        if (stage == 4) { FireOrb(); return; }
+
+        int maxBounces = stage + 2;  // stage 0=2, 1=3, 2=4, 3=5
+        int damage     = MinLaserDamage + (int)(frac * (MaxLaserDamage - MinLaserDamage));
         var pos = Position;
         var dir = new XnaVec(MathF.Cos(TurretAngle), MathF.Sin(TurretAngle));
         var tip = pos + dir * (Radius + TurretLen);
-        OnFire?.Invoke(_nextProjId++, tip, dir * LaserSpeed, WeaponType.Laser, damage);
+        OnFire?.Invoke(_nextProjId++, tip, dir * LaserSpeed, WeaponType.Laser, damage, maxBounces);
+    }
+
+    private void FireOrb()
+    {
+        var pos = Position;
+        var dir = new XnaVec(MathF.Cos(TurretAngle), MathF.Sin(TurretAngle));
+        var tip = pos + dir * (Radius + TurretLen);
+        OnFire?.Invoke(_nextProjId++, tip, dir * OrbSpeed, WeaponType.LaserOrb, MaxLaserDamage, 1);
     }
 
     public void Draw(SpriteBatch sb)
@@ -264,6 +329,16 @@ public sealed class HovercraftEntity
         float bAngle = IsLocal ? BodyAngle   : RemoteBodyAngle;
         float tAngle = IsLocal ? TurretAngle : RemoteTurretAngle;
         int   r      = (int)Radius;
+
+        // EMP debuff indicator — outer blue ring
+        if (HasDebuff(DebuffType.EmpSlow))
+        {
+            const int empPad = 8;
+            UIRenderer.DrawBorder(sb,
+                new Rectangle((int)pos.X - r - empPad, (int)pos.Y - r - empPad,
+                              (r + empPad) * 2, (r + empPad) * 2),
+                Color.FromNonPremultiplied(60, 210, 255, 200), 2);
+        }
 
         // Shield ring — brightness proportional to shield level
         if (Shield > 0)
@@ -298,12 +373,5 @@ public sealed class HovercraftEntity
         UIRenderer.ProgressBar(sb, new Rectangle((int)pos.X - bw / 2, (int)pos.Y - r - 12, bw, 5),
             Health, 100, Color.LimeGreen, new Color(60, 20, 20));
 
-        // Laser charge bar (local player only, shown when charging)
-        if (IsLocal && _chargeTime >= MinChargeToFire * 0.3f)
-        {
-            UIRenderer.ProgressBar(sb,
-                new Rectangle((int)pos.X - bw / 2, (int)pos.Y + r + 4, bw, 4),
-                _chargeTime, MaxChargeTime, new Color(80, 255, 200), new Color(20, 50, 40));
-        }
     }
 }

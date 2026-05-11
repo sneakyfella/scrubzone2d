@@ -1,4 +1,5 @@
 using Box2D.NET.Bindings;
+using ScrubZone2D.Config;
 using XnaVec = Microsoft.Xna.Framework.Vector2;
 using B2Vec = System.Numerics.Vector2;
 
@@ -11,6 +12,14 @@ public sealed class PhysicsBodyData
     public PhysicsTag Tag        { get; init; }
     public object?    Owner      { get; set; }
     public int        BounceCount { get; set; }
+
+    // Set by the game loop each frame before the physics step so ProcessContactEvents
+    // can capture the pre-bounce direction without needing a separate velocity snapshot pass.
+    public XnaVec  LastVelDir  { get; set; }
+
+    // Populated on the first wall contact.
+    public XnaVec? BouncePos   { get; set; }  // world-px position at moment of bounce
+    public XnaVec? IncomingDir { get; set; }  // normalized direction before the bounce
 }
 
 // Wrapper so callers don't need the Box2D.NET.Bindings namespace.
@@ -62,7 +71,8 @@ public sealed class PhysicsWorld : IDisposable
 
     private B2.WorldId _worldId;
     private int        _nextId = 1;
-    private readonly Dictionary<int, PhysicsBodyData> _dataById = new();
+    private readonly Dictionary<int, PhysicsBodyData> _dataById        = new();
+    private readonly HashSet<PhysicsBodyData>          _bouncedThisStep = new();
 
     public static B2Vec  ToB2(XnaVec v)  => new(v.X / PPM, v.Y / PPM);
     public static XnaVec ToXna(B2Vec v)  => new(v.X * PPM, v.Y * PPM);
@@ -86,6 +96,7 @@ public sealed class PhysicsWorld : IDisposable
 
     private unsafe void ProcessContactEvents()
     {
+        _bouncedThisStep.Clear();
         var events = B2.WorldGetContactEvents(_worldId);
         for (int i = 0; i < events.beginCount; i++)
         {
@@ -94,8 +105,32 @@ public sealed class PhysicsWorld : IDisposable
             var dataB = GetData(B2.ShapeGetBody(evt.shapeIdB));
             if (dataA == null || dataB == null) continue;
 
-            if      (dataA.Tag == PhysicsTag.Projectile && dataB.Tag == PhysicsTag.Wall) dataA.BounceCount++;
-            else if (dataB.Tag == PhysicsTag.Projectile && dataA.Tag == PhysicsTag.Wall) dataB.BounceCount++;
+            if (dataA.Tag == PhysicsTag.Projectile && dataB.Tag == PhysicsTag.Wall)
+            {
+                if (_bouncedThisStep.Add(dataA))
+                {
+                    if (dataA.BouncePos == null)
+                    {
+                        var p = B2.BodyGetPosition(B2.ShapeGetBody(evt.shapeIdA));
+                        dataA.BouncePos   = new XnaVec(p.x * PPM, p.y * PPM);
+                        dataA.IncomingDir = dataA.LastVelDir;
+                    }
+                    dataA.BounceCount++;
+                }
+            }
+            else if (dataB.Tag == PhysicsTag.Projectile && dataA.Tag == PhysicsTag.Wall)
+            {
+                if (_bouncedThisStep.Add(dataB))
+                {
+                    if (dataB.BouncePos == null)
+                    {
+                        var p = B2.BodyGetPosition(B2.ShapeGetBody(evt.shapeIdB));
+                        dataB.BouncePos   = new XnaVec(p.x * PPM, p.y * PPM);
+                        dataB.IncomingDir = dataB.LastVelDir;
+                    }
+                    dataB.BounceCount++;
+                }
+            }
         }
     }
 
@@ -133,11 +168,12 @@ public sealed class PhysicsWorld : IDisposable
 
     public unsafe PhysicsBody CreateHovercraft(XnaVec position, float radiusPx, object owner)
     {
+        var cfg             = GameConfig.Current.Ship;
         var bd              = B2.DefaultBodyDef();
         bd.type             = B2.dynamicBody;
         bd.position         = V(position);
-        bd.linearDamping    = 1.5f;
-        bd.angularDamping   = 8f;
+        bd.linearDamping    = cfg.LinearDamping;
+        bd.angularDamping   = cfg.AngularDamping;
         var bodyId          = B2.CreateBody(_worldId, &bd);
 
         var sd = B2.DefaultShapeDef();

@@ -1,0 +1,43 @@
+{
+  "Ship": {
+    "MaxSpeedPx": 120.0,
+    "ThrustForce": 480.0,
+    "LinearDamping": 4.0,
+    "AngularDamping": 8.0,
+    "Radius": 18.0,
+    "RotateSpeed": 3.2,
+    "TurretLen": 30.0,
+    "MaxShield": 75,
+    "ShieldRegenRate": 20.0,
+    "ShieldRegenDelay": 3.0,
+    "EmpSlowFactor": 0.2,
+    "EmpDebuffDuration": 4.0
+  },
+  "Kinetic": {
+    "Damage": 25,
+    "SpeedFactor": 0.85,
+    "FireCooldown": 0.45,
+    "BlastRadius": 100.0,
+    "BlastImpulsePx": 800.0
+  },
+  "Laser": {
+    "Speed": 2800.0,
+    "MinDamage": 15,
+    "MaxDamage": 55,
+    "MinChargeTime": 0.12,
+    "MaxChargeTime": 0.6,
+    "ChargeRate": 0.7
+  },
+  "LaserOrb": {
+    "Speed": 700.0,
+    "BlastRadius": 110.0,
+    "BlastImpulsePx": 1400.0,
+    "TriggerRadius": 40.0,
+    "EmpDamage": 50
+  },
+  "Gameplay": {
+    "RespawnDelay": 5.0,
+    "ExplosionDuration": 0.45,
+    "AllowSelfDamage": true
+  }
+}

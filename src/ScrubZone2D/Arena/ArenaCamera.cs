@@ -21,16 +21,20 @@ public sealed class ArenaCamera
         _mapH = mapHeight;
     }
 
+    // Transform is a pure translation, so screen→world is just the inverse translation.
+    public Vector2 ScreenToWorld(Vector2 screenPos) =>
+        new(screenPos.X - Transform.M41, screenPos.Y - Transform.M42);
+
     public void CenterOn(Vector2 worldPos)
     {
-        // Clamp so the viewport stays inside the map.
-        // When the map is smaller than the viewport in a dimension, center the map.
+        // Follow the player, clamping only when the map is large enough that the
+        // viewport would otherwise show outside the map bounds.
         float cx = _mapW <= ViewW
-            ? _mapW / 2f
+            ? worldPos.X
             : Math.Clamp(worldPos.X, ViewW / 2f, _mapW - ViewW / 2f);
 
         float cy = _mapH <= ViewH
-            ? _mapH / 2f
+            ? worldPos.Y
             : Math.Clamp(worldPos.Y, ViewH / 2f, _mapH - ViewH / 2f);
 
         Transform = Matrix.CreateTranslation(

@@ -1,11 +1,13 @@
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
+using MonoGameTemplate;
 using MonoGameTemplate.GameStates;
 using MonoGameTemplate.Input;
 using MonoGameTemplate.Rendering;
 using NetworkingLib.Core;
 using ScrubZone2D.Arena;
+using ScrubZone2D.Config;
 using ScrubZone2D.Entities;
 using ScrubZone2D.Gameplay;
 using ScrubZone2D.Network;
@@ -15,14 +17,17 @@ namespace ScrubZone2D.States;
 
 public sealed class GameplayState : GameState
 {
-    private const float StateUpdateHz  = 20f;
-    private const float RespawnDelay   = 5f;
-    private const float PhysicsStep    = 1f / 60f;
-    private const float PauseThreshold = 1.5f;   // silence before freezing
-    private const float StartupGrace   = 3f;      // initial window before silence detection
-    private const float ResumeDuration = 3f;      // countdown length
+    private const float StateUpdateHz    = 20f;
+    private const float PhysicsStep      = 1f / 60f;
+    private const float PauseThreshold   = 1.5f;
+    private const float StartupGrace     = 3f;
+    private const float ResumeDuration   = 3f;
 
-    private enum Phase { Playing, PeerSilent, Resuming }
+    private static float RespawnDelay      => GameConfig.Current.Gameplay.RespawnDelay;
+    private static float ExplosionDuration => GameConfig.Current.Gameplay.ExplosionDuration;
+
+    private enum Phase         { Playing, PeerSilent, Resuming }
+    private enum ExplosionKind { Kinetic, Orb, Emp }
 
     private readonly GameStateManager _stateManager;
 
@@ -32,7 +37,8 @@ public sealed class GameplayState : GameState
     private HovercraftEntity? _remote;
     private ObjectiveManager? _objectives;
 
-    private readonly Dictionary<(byte, int), ProjectileEntity> _projectiles = new();
+    private readonly Dictionary<(byte, int), ProjectileEntity>                                _projectiles = new();
+    private readonly List<(Vector2 Position, float TimeLeft, float Radius, ExplosionKind Kind)> _explosions  = new();
 
     private float             _stateTimer;
     private float             _physicsAccum;
@@ -151,10 +157,20 @@ public sealed class GameplayState : GameState
 
     private void TickPlaying(float dt, bool isHost, StateServices svc)
     {
-        _local!.UpdateLocal(dt, svc.Input);
+        _local!.UpdateLocal(dt, svc.Input, _camera.ScreenToWorld(svc.Input.VirtualPositionF));
 
         if (isHost)
             _remote!.DriveFromInput(_latestJoinerInput, dt);
+
+        // Snapshot each projectile's direction before Box2D runs so ProcessContactEvents
+        // can record the pre-bounce incoming direction on first wall contact.
+        foreach (var proj in _projectiles.Values)
+        {
+            if (proj.IsDestroyed) continue;
+            var v = proj.Velocity;
+            float spd = v.Length();
+            proj.PhysicsBody.Data.LastVelDir = spd > 0.1f ? v / spd : Vector2.Zero;
+        }
 
         _physicsAccum += dt;
         while (_physicsAccum >= PhysicsStep)
@@ -164,7 +180,20 @@ public sealed class GameplayState : GameState
             _physicsAccum -= PhysicsStep;
         }
 
+        foreach (var proj in _projectiles.Values)
+            proj.UpdateEffects(dt);
+
+        _local!.UpdateDebuffs(dt);
+        _remote!.UpdateDebuffs(dt);
+
         CleanupProjectiles(isHost);
+
+        for (int i = _explosions.Count - 1; i >= 0; i--)
+        {
+            var (pos, tl, radius, kind) = _explosions[i];
+            if (tl - dt <= 0f) _explosions.RemoveAt(i);
+            else _explosions[i] = (pos, tl - dt, radius, kind);
+        }
 
         if (_localRespawnTimer >= 0f)
         {
@@ -264,54 +293,101 @@ public sealed class GameplayState : GameState
 
     private void ProcessCollisions()
     {
-        const float hitDist = HovercraftEntity.Radius + 6f;
+        float hitDist = HovercraftEntity.Radius + 6f;
 
         foreach (var proj in _projectiles.Values.ToList())
         {
             if (proj.IsDestroyed) continue;
 
-            var target = proj.OwnerPlayerId == _local!.PlayerId ? _remote! : _local!;
-            if (!target.IsAlive) continue;
-            if (Vector2.Distance(proj.Position, target.Position) > hitDist) continue;
-
-            int remainingShield, remainingHull;
+            // Kinetic projectile detonates a LaserOrb on proximity → kinetic + EMP explosions
             if (proj.Type == WeaponType.Kinetic)
             {
-                remainingShield = Math.Max(0, target.Shield - proj.Damage / 10);
-                remainingHull   = Math.Max(0, target.Health - proj.Damage);
+                foreach (var orb in _projectiles.Values)
+                {
+                    if (orb.IsDestroyed || orb.Type != WeaponType.LaserOrb) continue;
+                    if (Vector2.Distance(proj.Position, orb.Position) > HovercraftEntity.OrbTriggerRadius) continue;
+
+                    var orbPos        = orb.Position;
+                    byte kineticOwner = proj.OwnerPlayerId;
+                    proj.SuppressExplosion = true;
+                    proj.Destroy();
+                    orb.Destroy();
+
+                    // EMP explosion only — no kinetic impact when manually detonating
+                    _explosions.Add((orbPos, ExplosionDuration, HovercraftEntity.OrbBlastRadius, ExplosionKind.Emp));
+                    ApplyAreaDamage(orbPos, HovercraftEntity.OrbBlastRadius, HovercraftEntity.OrbEmpDamage, isEmp: true, kineticOwner);
+
+                    NetworkManager.Instance.SendReliable(new ProjectileDestroyedPacket { ProjectileId = proj.Id });
+                    NetworkManager.Instance.SendReliable(new ProjectileDestroyedPacket { ProjectileId = orb.Id });
+                    break;
+                }
             }
-            else
-            {
-                int shieldDmg   = Math.Min(target.Shield, proj.Damage);
-                int overflow    = proj.Damage - shieldDmg;
-                remainingShield = target.Shield - shieldDmg;
-                remainingHull   = Math.Max(0, target.Health - overflow / 10);
-            }
 
-            target.TakeDamage(remainingShield, remainingHull);
-            proj.Destroy();
+            if (proj.IsDestroyed) continue;
 
-            NetworkManager.Instance.SendReliable(new PlayerDamagedPacket
-            {
-                TargetId        = target.PlayerId,
-                AttackerId      = proj.OwnerPlayerId,
-                ProjectileId    = proj.Id,
-                RemainingShield = remainingShield,
-                RemainingHull   = remainingHull
-            });
-            NetworkManager.Instance.SendReliable(
-                new ProjectileDestroyedPacket { ProjectileId = proj.Id });
+            var opponent = proj.OwnerPlayerId == _local!.PlayerId ? _remote! : _local!;
+            ApplyDirectHit(proj, opponent, hitDist);
 
-            if (remainingHull <= 0)
+            if (!proj.IsDestroyed && GameConfig.Current.Gameplay.AllowSelfDamage)
             {
-                target.Die();
-                bool killerIsHost = proj.OwnerPlayerId == _local.PlayerId;
-                NetworkManager.Instance.SendReliable(
-                    _objectives!.RecordKill(killerIsPlayer0: killerIsHost));
-                if (target == _local)
-                    _localRespawnTimer = RespawnDelay;
+                var owner = proj.OwnerPlayerId == _local.PlayerId ? _local! : _remote!;
+                ApplyDirectHit(proj, owner, hitDist);
             }
         }
+    }
+
+    private bool ApplyDirectHit(ProjectileEntity proj, HovercraftEntity target, float hitDist)
+    {
+        if (!target.IsAlive) return false;
+        if (Vector2.Distance(proj.Position, target.Position) > hitDist) return false;
+
+        int remainingShield, remainingHull;
+        if (proj.Type == WeaponType.Kinetic)
+        {
+            remainingShield = Math.Max(0, target.Shield - proj.Damage / 10);
+            remainingHull   = Math.Max(0, target.Health - proj.Damage);
+        }
+        else
+        {
+            int shieldDmg   = Math.Min(target.Shield, proj.Damage);
+            int overflow    = proj.Damage - shieldDmg;
+            remainingShield = target.Shield - shieldDmg;
+            remainingHull   = Math.Max(0, target.Health - overflow / 10);
+        }
+
+        target.TakeDamage(remainingShield, remainingHull);
+
+        if (proj.Type == WeaponType.LaserOrb)
+        {
+            var orbPos = proj.Position;
+            _explosions.Add((orbPos, ExplosionDuration, HovercraftEntity.OrbBlastRadius, ExplosionKind.Orb));
+            ApplyBlastImpulse(orbPos, HovercraftEntity.OrbBlastRadius, HovercraftEntity.OrbBlastImpulsePx);
+        }
+
+        proj.Destroy();
+
+        NetworkManager.Instance.SendReliable(new PlayerDamagedPacket
+        {
+            TargetId        = target.PlayerId,
+            AttackerId      = proj.OwnerPlayerId,
+            ProjectileId    = proj.Id,
+            RemainingShield = remainingShield,
+            RemainingHull   = remainingHull
+        });
+        NetworkManager.Instance.SendReliable(
+            new ProjectileDestroyedPacket { ProjectileId = proj.Id });
+
+        if (remainingHull <= 0)
+        {
+            target.Die();
+            bool killerIsHost = proj.OwnerPlayerId == _local!.PlayerId;
+            NetworkManager.Instance.SendReliable(
+                _objectives!.RecordKill(killerIsPlayer0: killerIsHost));
+            if (target == _local)
+                _localRespawnTimer = RespawnDelay;
+        }
+
+        return true;
     }
 
     // ── Projectile helpers ─────────────────────────────────────────────────────
@@ -321,6 +397,20 @@ public sealed class GameplayState : GameState
         foreach (var proj in _projectiles.Values
             .Where(p => p.IsDestroyed || p.ShouldDestroy()).ToList())
         {
+            if (proj.Type == WeaponType.Kinetic && !proj.SuppressExplosion)
+            {
+                var ep = proj.Position;
+                _explosions.Add((ep, ExplosionDuration, HovercraftEntity.KineticBlastRadius, ExplosionKind.Kinetic));
+                if (isHost) ApplyBlastImpulse(ep, HovercraftEntity.KineticBlastRadius, HovercraftEntity.KineticBlastImpulsePx);
+            }
+            else if (proj.Type == WeaponType.LaserOrb && !proj.IsDestroyed)
+            {
+                // Wall hit — explosion not yet triggered by ProcessCollisions
+                var ep = proj.Position;
+                _explosions.Add((ep, ExplosionDuration, HovercraftEntity.OrbBlastRadius, ExplosionKind.Orb));
+                if (isHost) ApplyBlastImpulse(ep, HovercraftEntity.OrbBlastRadius, HovercraftEntity.OrbBlastImpulsePx);
+            }
+
             if (isHost && proj.IsLocal && !proj.IsDestroyed)
                 NetworkManager.Instance.SendReliable(
                     new ProjectileDestroyedPacket { ProjectileId = proj.Id });
@@ -328,6 +418,90 @@ public sealed class GameplayState : GameState
             _physics!.DestroyBody(proj.PhysicsBody);
             _projectiles.Remove((proj.OwnerPlayerId, proj.Id));
         }
+    }
+
+    private void ApplyBlastImpulse(Vector2 pos, float radius, float impulsePx)
+    {
+        PushPlayerFromExplosion(_local!,  pos, radius, impulsePx);
+        PushPlayerFromExplosion(_remote!, pos, radius, impulsePx);
+    }
+
+    private static void PushPlayerFromExplosion(HovercraftEntity player, Vector2 pos, float radius, float impulsePx)
+    {
+        if (!player.IsAlive) return;
+        var delta = player.Position - pos;
+        float dist = delta.Length();
+        if (dist < 1f || dist > radius) return;
+        var dir    = delta / dist;
+        var curVel = player.PhysicsBody.GetLinearVelocity();
+        player.PhysicsBody.SetLinearVelocity(
+            curVel + PhysicsWorld.ToB2(dir * impulsePx));
+    }
+
+    private void ApplyAreaDamage(Vector2 pos, float radius, int damage, bool isEmp, byte killerPlayerId)
+    {
+        ApplyAreaDamageToPlayer(_local!,  pos, radius, damage, isEmp, killerPlayerId);
+        ApplyAreaDamageToPlayer(_remote!, pos, radius, damage, isEmp, killerPlayerId);
+    }
+
+    private void ApplyAreaDamageToPlayer(HovercraftEntity player, Vector2 pos,
+        float radius, int damage, bool isEmp, byte killerPlayerId)
+    {
+        if (!GameConfig.Current.Gameplay.AllowSelfDamage && player.PlayerId == killerPlayerId) return;
+        if (!player.IsAlive) return;
+        float dist = Vector2.Distance(player.Position, pos);
+        if (dist > radius) return;
+
+        float falloff  = 1f - (dist / radius);
+        int   scaled   = Math.Max(1, (int)(damage * falloff));
+
+        int remainingShield, remainingHull;
+        if (isEmp)
+        {
+            // EMP: strips shields, negligible hull
+            int shieldDmg   = Math.Min(player.Shield, scaled);
+            remainingShield = player.Shield - shieldDmg;
+            remainingHull   = player.Health;
+        }
+        else
+        {
+            // Kinetic area: less shield, more hull
+            remainingShield = Math.Max(0, player.Shield - scaled / 8);
+            remainingHull   = Math.Max(0, player.Health - scaled);
+        }
+
+        if (remainingShield == player.Shield && remainingHull == player.Health && !isEmp) return;
+
+        player.TakeDamage(remainingShield, remainingHull);
+        if (remainingShield != player.Shield || remainingHull != player.Health)
+            NetworkManager.Instance.SendReliable(new PlayerDamagedPacket
+            {
+                TargetId        = player.PlayerId,
+                AttackerId      = killerPlayerId,
+                ProjectileId    = -1,
+                RemainingShield = remainingShield,
+                RemainingHull   = remainingHull
+            });
+
+        if (isEmp)
+        {
+            float dur = GameConfig.Current.Ship.EmpDebuffDuration;
+            player.ApplyDebuff(DebuffType.EmpSlow, dur);
+            NetworkManager.Instance.SendReliable(new DebuffPacket
+            {
+                PlayerId   = player.PlayerId,
+                EffectType = (byte)DebuffType.EmpSlow,
+                Duration   = dur
+            });
+        }
+
+        if (remainingHull > 0) return;
+
+        player.Die();
+        bool killerIsHost = killerPlayerId == _local!.PlayerId;
+        NetworkManager.Instance.SendReliable(_objectives!.RecordKill(killerIsPlayer0: killerIsHost));
+        if (player == _local)
+            _localRespawnTimer = RespawnDelay;
     }
 
     private void ClearAllProjectiles()
@@ -339,9 +513,9 @@ public sealed class GameplayState : GameState
 
     // ── Firing ─────────────────────────────────────────────────────────────────
 
-    private void OnLocalFire(int id, Vector2 origin, Vector2 vel, WeaponType weaponType, int damage)
+    private void OnLocalFire(int id, Vector2 origin, Vector2 vel, WeaponType weaponType, int damage, int maxBounces)
     {
-        SpawnProjectile(id, NetworkManager.Instance.LocalPlayerId, true, origin, vel, weaponType, damage);
+        SpawnProjectile(id, NetworkManager.Instance.LocalPlayerId, true, origin, vel, weaponType, damage, maxBounces);
         NetworkManager.Instance.SendReliable(new FireProjectilePacket
         {
             OwnerPlayerId = NetworkManager.Instance.LocalPlayerId,
@@ -349,16 +523,17 @@ public sealed class GameplayState : GameState
             OriginX = origin.X, OriginY = origin.Y,
             VelX    = vel.X,    VelY    = vel.Y,
             WeaponType = (byte)weaponType,
-            Damage     = damage
+            Damage     = damage,
+            MaxBounces = (byte)maxBounces
         });
     }
 
     private void SpawnProjectile(int id, byte owner, bool isLocal, Vector2 origin, Vector2 vel,
-        WeaponType weaponType, int damage)
+        WeaponType weaponType, int damage, int maxBounces)
     {
         if (_projectiles.ContainsKey((owner, id))) return;
         var body = _physics!.CreateProjectile(origin, vel, null!);
-        var proj = new ProjectileEntity(id, owner, isLocal, body, weaponType, damage);
+        var proj = new ProjectileEntity(id, owner, isLocal, body, weaponType, damage, maxBounces);
         body.Data.Owner = proj;
         _projectiles[(owner, id)] = proj;
     }
@@ -401,7 +576,7 @@ public sealed class GameplayState : GameState
             case FireProjectilePacket fire:
                 SpawnProjectile(fire.ProjectileId, fire.OwnerPlayerId, false,
                     new(fire.OriginX, fire.OriginY), new(fire.VelX, fire.VelY),
-                    (WeaponType)fire.WeaponType, fire.Damage);
+                    (WeaponType)fire.WeaponType, fire.Damage, fire.MaxBounces);
                 break;
 
             case ProjectileDestroyedPacket destroy:
@@ -429,6 +604,13 @@ public sealed class GameplayState : GameState
             case PlayerRespawnPacket respawn when respawn.PlayerId == _local?.PlayerId:
                 _local.Respawn(new Vector2(respawn.X, respawn.Y));
                 break;
+
+            case DebuffPacket debuff:
+            {
+                var debuffTarget = debuff.PlayerId == _local?.PlayerId ? _local : _remote;
+                debuffTarget?.ApplyDebuff((DebuffType)debuff.EffectType, debuff.Duration);
+                break;
+            }
 
             case ScoreUpdatePacket score:
                 _objectives?.ApplyScore(score);
@@ -461,6 +643,7 @@ public sealed class GameplayState : GameState
         _remote!.Draw(sb);
         foreach (var p in _projectiles.Values)
             p.Draw(sb);
+        DrawExplosions(sb);
         sb.End();
 
         // HUD — screen-space, no camera transform
@@ -488,6 +671,8 @@ public sealed class GameplayState : GameState
             _local!.Shield, HovercraftEntity.MaxShield, new Color(60, 180, 255), new Color(15, 35, 60));
         UIRenderer.ProgressBar(sb, new Rectangle(20, 661, 200, 14),
             _local.Health, 100, Color.LimeGreen, new Color(60, 20, 20));
+        if (_local.HasDebuff(DebuffType.EmpSlow))
+            UIRenderer.Text(sb, "EMP", new Vector2(226, 661), new Color(60, 210, 255), small: true);
 
         // Remote player (bottom right)
         UIRenderer.Text(sb, isHost ? "Opponent" : "Host",
@@ -496,6 +681,37 @@ public sealed class GameplayState : GameState
             _remote!.Shield, HovercraftEntity.MaxShield, new Color(60, 180, 255), new Color(15, 35, 60));
         UIRenderer.ProgressBar(sb, new Rectangle(1060, 661, 200, 14),
             _remote.Health, 100, Color.OrangeRed, new Color(60, 20, 20));
+
+        // Laser charge bar — bottom center HUD, shown while charging
+        if (_local!.IsAlive && _local.ChargeTime >= HovercraftEntity.MinChargeToFire * 0.3f)
+        {
+            const int bx = 490, by = 598, bw = 300, bh = 20;
+            float frac  = Math.Clamp(_local.ChargeTime / HovercraftEntity.MaxChargeTime, 0f, 1f);
+            int   stage = _local.ChargeStage;
+
+            UIRenderer.FillRect(sb, new Rectangle(bx, by, bw, bh), new Color(15, 20, 15));
+            var fillCol = stage < 4
+                ? Color.Lerp(new Color(60, 220, 80), new Color(200, 60, 255), frac)
+                : new Color(200, 60, 255);
+            UIRenderer.FillRect(sb, new Rectangle(bx, by, (int)(bw * frac), bh), fillCol);
+            UIRenderer.DrawBorder(sb, new Rectangle(bx, by, bw, bh), new Color(80, 100, 60), 1);
+
+            // Stage dividers at 25 / 50 / 75 % of bar
+            for (int i = 1; i <= 3; i++)
+                UIRenderer.FillRect(sb, new Rectangle(bx + bw * i / 4 - 1, by, 2, bh),
+                    new Color(210, 210, 160, 170));
+
+            // Stage labels (above dividers + base + orb)
+            string[] stageLabels = ["2", "3", "4", "5", "ORB"];
+            int[]    labelOffsets = [2, bw / 4 - 4, bw / 2 - 4, 3 * bw / 4 - 4, bw - 20];
+            for (int i = 0; i < 5; i++)
+            {
+                var lc = i <= stage ? Color.White : new Color(100, 100, 80);
+                UIRenderer.Text(sb, stageLabels[i], new Vector2(bx + labelOffsets[i], by - 13), lc, small: true);
+            }
+
+            UIRenderer.Text(sb, "LASER CHARGE", new Vector2(bx, by - 25), new Color(100, 210, 100), small: true);
+        }
 
         // Controls hint (top left, small)
         UIRenderer.Text(sb, "WASD move | LClick kinetic | Hold RClick laser | ESC quit",
@@ -538,5 +754,58 @@ public sealed class GameplayState : GameState
             UIRenderer.TextCentered(sb, "Press ESC to return to menu",
                 new Rectangle(0, 400, 1280, 40), Color.Gray, small: true);
         }
+    }
+
+    private void DrawExplosions(SpriteBatch sb)
+    {
+        foreach (var (pos, tl, radius, kind) in _explosions)
+        {
+            float t = tl / ExplosionDuration;  // 1 → 0
+
+            Color outerCol, innerCol;
+            switch (kind)
+            {
+                case ExplosionKind.Emp:
+                    outerCol = Color.FromNonPremultiplied(60, 210, 255, (int)(t * 220));
+                    innerCol = Color.FromNonPremultiplied(200, 245, 255, (int)(t * t * 190));
+                    break;
+                case ExplosionKind.Orb:
+                    outerCol = Color.FromNonPremultiplied(180, 80, 255,  (int)(t * 210));
+                    innerCol = Color.FromNonPremultiplied(230, 180, 255, (int)(t * t * 170));
+                    break;
+                default: // Kinetic
+                    outerCol = Color.FromNonPremultiplied(255, 140, 40,  (int)(t * 210));
+                    innerCol = Color.FromNonPremultiplied(255, 220, 120, (int)(t * t * 170));
+                    break;
+            }
+
+            DrawCircle(sb, pos, radius, outerCol, 32);
+            float innerR = radius * (1f - t);
+            if (innerR > 1f)
+                DrawCircle(sb, pos, innerR, innerCol, 24);
+        }
+    }
+
+    private static void DrawCircle(SpriteBatch sb, Vector2 center, float radius, Color color, int segments)
+    {
+        for (int i = 0; i < segments; i++)
+        {
+            float a1 = i       / (float)segments * MathF.Tau;
+            float a2 = (i + 1) / (float)segments * MathF.Tau;
+            var p1 = center + new Vector2(MathF.Cos(a1), MathF.Sin(a1)) * radius;
+            var p2 = center + new Vector2(MathF.Cos(a2), MathF.Sin(a2)) * radius;
+            DrawSegment(sb, p1, p2, color, 2);
+        }
+    }
+
+    private static void DrawSegment(SpriteBatch sb, Vector2 from, Vector2 to, Color color, int thickness)
+    {
+        if (MGT.Pixel == null) return;
+        var   d   = to - from;
+        float len = d.Length();
+        if (len < 0.5f) return;
+        sb.Draw(MGT.Pixel, from, null, color,
+            MathF.Atan2(d.Y, d.X), Vector2.Zero,
+            new Vector2(len, thickness), SpriteEffects.None, 0f);
     }
 }

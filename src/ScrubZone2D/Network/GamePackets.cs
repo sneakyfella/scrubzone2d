@@ -14,6 +14,7 @@ public static class GamePacketIds
     public const byte PlayerRespawn       = 0x56;
     public const byte JoinerInput         = 0x57;
     public const byte ResumeCountdown     = 0x58;
+    public const byte Debuff              = 0x59;
 }
 
 // Sent unreliably ~20 Hz — position/velocity/angles + shield for one hovercraft
@@ -61,13 +62,14 @@ public sealed class FireProjectilePacket : IPacket
     public float  VelY          { get; set; }
     public byte   WeaponType    { get; set; }
     public int    Damage        { get; set; }
+    public byte   MaxBounces    { get; set; }
 
     public void Serialize(BinaryWriter w)
     {
         w.Write(OwnerPlayerId); w.Write(ProjectileId);
         w.Write(OriginX); w.Write(OriginY);
         w.Write(VelX); w.Write(VelY);
-        w.Write(WeaponType); w.Write(Damage);
+        w.Write(WeaponType); w.Write(Damage); w.Write(MaxBounces);
     }
 
     public void Deserialize(BinaryReader r)
@@ -75,7 +77,7 @@ public sealed class FireProjectilePacket : IPacket
         OwnerPlayerId = r.ReadByte(); ProjectileId = r.ReadInt32();
         OriginX = r.ReadSingle(); OriginY = r.ReadSingle();
         VelX    = r.ReadSingle(); VelY    = r.ReadSingle();
-        WeaponType = r.ReadByte(); Damage = r.ReadInt32();
+        WeaponType = r.ReadByte(); Damage = r.ReadInt32(); MaxBounces = r.ReadByte();
     }
 }
 
@@ -160,6 +162,18 @@ public sealed class JoinerInputPacket : IPacket
     }
 }
 
+// Sent reliably by host when a player receives a status debuff
+public sealed class DebuffPacket : IPacket
+{
+    public byte  PacketTypeId => GamePacketIds.Debuff;
+    public byte  PlayerId     { get; set; }
+    public byte  EffectType   { get; set; }
+    public float Duration     { get; set; }
+
+    public void Serialize(BinaryWriter w)   { w.Write(PlayerId); w.Write(EffectType); w.Write(Duration); }
+    public void Deserialize(BinaryReader r) { PlayerId = r.ReadByte(); EffectType = r.ReadByte(); Duration = r.ReadSingle(); }
+}
+
 // Sent reliably by host once per second during graceful resume countdown
 public sealed class ResumeCountdownPacket : IPacket
 {
@@ -182,5 +196,6 @@ public static class GamePacketRegistrar
         PacketRegistry.Register(GamePacketIds.PlayerRespawn,       () => new PlayerRespawnPacket());
         PacketRegistry.Register(GamePacketIds.JoinerInput,         () => new JoinerInputPacket());
         PacketRegistry.Register(GamePacketIds.ResumeCountdown,     () => new ResumeCountdownPacket());
+        PacketRegistry.Register(GamePacketIds.Debuff,              () => new DebuffPacket());
     }
 }
