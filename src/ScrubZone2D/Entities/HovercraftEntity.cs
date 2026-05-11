@@ -57,8 +57,13 @@ public sealed class HovercraftEntity
     private float _shieldRegen;
     private float _chargeTime;
     private int   _nextProjId = 1;
+    private KeyboardState _prevKb;
 
     private readonly List<(DebuffType Type, float TimeLeft)> _debuffs = new();
+    private readonly List<(BuffType   Type, float TimeLeft)> _buffs   = new();
+
+    public bool  ShieldDeployed { get; private set; }
+    public float ShieldAngle    { get; private set; }
 
     public float ChargeTime  => _chargeTime;
 
@@ -67,7 +72,13 @@ public sealed class HovercraftEntity
             ? MaxSpeedPx * GameConfig.Current.Ship.EmpSlowFactor
             : MaxSpeedPx;
 
+    public float DamageMultiplier =>
+        HasBuff(BuffType.DamageBoost)
+            ? 1f + GameConfig.Current.Ship.DamageBoostFactor
+            : 1f;
+
     public bool HasDebuff(DebuffType type) => _debuffs.Any(d => d.Type == type);
+    public bool HasBuff  (BuffType   type) => _buffs  .Any(b => b.Type == type);
 
     public void ApplyDebuff(DebuffType type, float duration)
     {
@@ -80,6 +91,17 @@ public sealed class HovercraftEntity
         _debuffs.Add((type, duration));
     }
 
+    public void ApplyBuff(BuffType type, float duration)
+    {
+        for (int i = 0; i < _buffs.Count; i++)
+        {
+            if (_buffs[i].Type != type) continue;
+            if (duration > _buffs[i].TimeLeft) _buffs[i] = (type, duration);
+            return;
+        }
+        _buffs.Add((type, duration));
+    }
+
     public void UpdateDebuffs(float dt)
     {
         for (int i = _debuffs.Count - 1; i >= 0; i--)
@@ -87,6 +109,16 @@ public sealed class HovercraftEntity
             var (t, tl) = _debuffs[i];
             if (tl - dt <= 0f) _debuffs.RemoveAt(i);
             else               _debuffs[i] = (t, tl - dt);
+        }
+    }
+
+    public void UpdateBuffs(float dt)
+    {
+        for (int i = _buffs.Count - 1; i >= 0; i--)
+        {
+            var (t, tl) = _buffs[i];
+            if (tl - dt <= 0f) _buffs.RemoveAt(i);
+            else               _buffs[i] = (t, tl - dt);
         }
     }
 
@@ -135,6 +167,8 @@ public sealed class HovercraftEntity
         _chargeTime       = 0f;
         _fireCooldown     = 0f;
         _debuffs.Clear();
+        _buffs.Clear();
+        ShieldDeployed = false;
         PhysicsBody.SetTransform(PhysicsWorld.ToB2(pos), 0f);
         PhysicsBody.SetLinearVelocity(PhysicsWorld.ToB2(XnaVec.Zero));
     }
@@ -168,6 +202,19 @@ public sealed class HovercraftEntity
         _fireCooldown = MathF.Max(0f, _fireCooldown - dt);
 
         var kb      = Keyboard.GetState();
+
+        if (kb.IsKeyDown(Keys.E) && !_prevKb.IsKeyDown(Keys.E))
+        {
+            if (ShieldDeployed)
+                ShieldDeployed = false;
+            else
+            {
+                ShieldDeployed = true;
+                ShieldAngle    = BodyAngle + MathF.PI / 2f;
+            }
+        }
+        _prevKb = kb;
+
         var moveDir = XnaVec.Zero;
         if (kb.IsKeyDown(Keys.W)) moveDir.Y -= 1f;
         if (kb.IsKeyDown(Keys.S)) moveDir.Y += 1f;
@@ -220,6 +267,14 @@ public sealed class HovercraftEntity
             PhysicsBody.SetLinearVelocity(vel / spd * PhysicsWorld.ToM(EffectiveMaxSpeedPx));
         TurretAngle = input.AimAngle;
 
+        if (input.ShieldActive && !ShieldDeployed)
+        {
+            ShieldDeployed = true;
+            ShieldAngle    = input.ShieldAngle;
+        }
+        else if (!input.ShieldActive)
+            ShieldDeployed = false;
+
         // Mirror shield regen on host for joiner entity
         if (_shieldRegenTimer > 0f)
             _shieldRegenTimer = MathF.Max(0f, _shieldRegenTimer - dt);
@@ -245,10 +300,12 @@ public sealed class HovercraftEntity
         { var n = XnaVec.Normalize(new XnaVec(dx, dy)); dx = n.X; dy = n.Y; }
         return new JoinerInputPacket
         {
-            DirX = dx, DirY = dy,
-            AimAngle  = TurretAngle,
-            RightHeld  = InputHelper.IsMouseDown(1),
-            ChargeTime = _chargeTime
+            DirX         = dx, DirY = dy,
+            AimAngle     = TurretAngle,
+            RightHeld    = InputHelper.IsMouseDown(1),
+            ChargeTime   = _chargeTime,
+            ShieldActive = ShieldDeployed,
+            ShieldAngle  = ShieldAngle
         };
     }
 
@@ -264,18 +321,25 @@ public sealed class HovercraftEntity
         PhysicsBody.SetTransform(PhysicsWorld.ToB2(RemotePosition), RemoteBodyAngle);
         PhysicsBody.SetLinearVelocity(PhysicsWorld.ToB2(new XnaVec(pkt.VelX, pkt.VelY)));
         TurretAngle = RemoteTurretAngle;
+        if (!IsLocal)
+        {
+            ShieldDeployed = pkt.ShieldActive;
+            ShieldAngle    = pkt.ShieldAngle;
+        }
     }
 
     public HovercraftStatePacket BuildStatePacket() => new()
     {
-        PlayerId    = PlayerId,
-        X           = Position.X,
-        Y           = Position.Y,
-        VelX        = Velocity.X,
-        VelY        = Velocity.Y,
-        BodyAngle   = BodyAngle,
-        TurretAngle = TurretAngle,
-        Shield      = (byte)Shield
+        PlayerId     = PlayerId,
+        X            = Position.X,
+        Y            = Position.Y,
+        VelX         = Velocity.X,
+        VelY         = Velocity.Y,
+        BodyAngle    = BodyAngle,
+        TurretAngle  = TurretAngle,
+        Shield       = (byte)Shield,
+        ShieldActive = ShieldDeployed,
+        ShieldAngle  = ShieldAngle
     };
 
     private static void DrawLine(SpriteBatch sb, XnaVec from, XnaVec to, Color color, int thickness)
@@ -294,7 +358,8 @@ public sealed class HovercraftEntity
         var pos = Position;
         var dir = new XnaVec(MathF.Cos(TurretAngle), MathF.Sin(TurretAngle));
         var tip = pos + dir * (Radius + TurretLen);
-        OnFire?.Invoke(_nextProjId++, tip, dir * ProjectileSpd, WeaponType.Kinetic, KineticDamage, 1);
+        OnFire?.Invoke(_nextProjId++, tip, dir * ProjectileSpd, WeaponType.Kinetic,
+            (int)(KineticDamage * DamageMultiplier), 1);
     }
 
     private void FireLaser()
@@ -306,7 +371,7 @@ public sealed class HovercraftEntity
         if (stage == 4) { FireOrb(); return; }
 
         int maxBounces = stage + 2;  // stage 0=2, 1=3, 2=4, 3=5
-        int damage     = MinLaserDamage + (int)(frac * (MaxLaserDamage - MinLaserDamage));
+        int damage     = (int)((MinLaserDamage + (int)(frac * (MaxLaserDamage - MinLaserDamage))) * DamageMultiplier);
         var pos = Position;
         var dir = new XnaVec(MathF.Cos(TurretAngle), MathF.Sin(TurretAngle));
         var tip = pos + dir * (Radius + TurretLen);
@@ -318,7 +383,8 @@ public sealed class HovercraftEntity
         var pos = Position;
         var dir = new XnaVec(MathF.Cos(TurretAngle), MathF.Sin(TurretAngle));
         var tip = pos + dir * (Radius + TurretLen);
-        OnFire?.Invoke(_nextProjId++, tip, dir * OrbSpeed, WeaponType.LaserOrb, MaxLaserDamage, 1);
+        OnFire?.Invoke(_nextProjId++, tip, dir * OrbSpeed, WeaponType.LaserOrb,
+            (int)(MaxLaserDamage * DamageMultiplier), 1);
     }
 
     public void Draw(SpriteBatch sb)
@@ -329,6 +395,16 @@ public sealed class HovercraftEntity
         float bAngle = IsLocal ? BodyAngle   : RemoteBodyAngle;
         float tAngle = IsLocal ? TurretAngle : RemoteTurretAngle;
         int   r      = (int)Radius;
+
+        // DamageBoost buff indicator — outer gold ring
+        if (HasBuff(BuffType.DamageBoost))
+        {
+            const int dmgPad = 12;
+            UIRenderer.DrawBorder(sb,
+                new Rectangle((int)pos.X - r - dmgPad, (int)pos.Y - r - dmgPad,
+                              (r + dmgPad) * 2, (r + dmgPad) * 2),
+                Color.FromNonPremultiplied(255, 210, 60, 200), 2);
+        }
 
         // EMP debuff indicator — outer blue ring
         if (HasDebuff(DebuffType.EmpSlow))

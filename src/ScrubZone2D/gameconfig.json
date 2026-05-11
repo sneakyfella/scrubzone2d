@@ -11,7 +11,11 @@
     "ShieldRegenRate": 20.0,
     "ShieldRegenDelay": 3.0,
     "EmpSlowFactor": 0.2,
-    "EmpDebuffDuration": 4.0
+    "EmpDebuffDuration": 4.0,
+    "DamageBoostFactor": 0.15,
+    "DamageBoostDuration": 5.0,
+    "ShieldLength": 80.0,
+    "ShieldThicknessPx": 6.0
   },
   "Kinetic": {
     "Damage": 25,

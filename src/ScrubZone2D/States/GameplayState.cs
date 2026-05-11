@@ -56,6 +56,9 @@ public sealed class GameplayState : GameState
     private ArenaCamera _camera     = new(Game1.VirtualWidth, Game1.VirtualHeight);
     private Vector2  _localSpawn;   // used as camera target while respawning
 
+    private PhysicsBody? _localShield;
+    private PhysicsBody? _remoteShield;
+
     private static readonly Color HostColor   = new(255, 200, 80);
     private static readonly Color JoinerColor = new(80, 200, 255);
 
@@ -98,6 +101,8 @@ public sealed class GameplayState : GameState
         var net = NetworkManager.Instance;
         net.GamePacketReceived -= OnNetworkPacket;
         net.Disconnected       -= OnDisconnected;
+        if (_localShield  != null) { _physics?.DestroyBody(_localShield);  _localShield  = null; }
+        if (_remoteShield != null) { _physics?.DestroyBody(_remoteShield); _remoteShield = null; }
         _physics?.Dispose();
         base.Exit();
     }
@@ -185,7 +190,10 @@ public sealed class GameplayState : GameState
 
         _local!.UpdateDebuffs(dt);
         _remote!.UpdateDebuffs(dt);
+        _local!.UpdateBuffs(dt);
+        _remote!.UpdateBuffs(dt);
 
+        UpdateShieldPhysics(isHost);
         CleanupProjectiles(isHost);
 
         for (int i = _explosions.Count - 1; i >= 0; i--)
@@ -341,6 +349,8 @@ public sealed class GameplayState : GameState
         if (!target.IsAlive) return false;
         if (Vector2.Distance(proj.Position, target.Position) > hitDist) return false;
 
+        bool shieldWasDown = target.Shield == 0;
+
         int remainingShield, remainingHull;
         if (proj.Type == WeaponType.Kinetic)
         {
@@ -356,6 +366,20 @@ public sealed class GameplayState : GameState
         }
 
         target.TakeDamage(remainingShield, remainingHull);
+
+        // Wrong ammo penalty: laser used against a shield-less target → target gets DamageBoost buff
+        bool isLaser = proj.Type == WeaponType.Laser || proj.Type == WeaponType.LaserOrb;
+        if (isLaser && shieldWasDown && remainingHull > 0)
+        {
+            float dur = GameConfig.Current.Ship.DamageBoostDuration;
+            target.ApplyBuff(BuffType.DamageBoost, dur);
+            NetworkManager.Instance.SendReliable(new BuffPacket
+            {
+                PlayerId   = target.PlayerId,
+                EffectType = (byte)BuffType.DamageBoost,
+                Duration   = dur
+            });
+        }
 
         if (proj.Type == WeaponType.LaserOrb)
         {
@@ -511,6 +535,32 @@ public sealed class GameplayState : GameState
         _projectiles.Clear();
     }
 
+    // ── Shield physics ──────────────────────────────────────────────────────────
+
+    private void UpdateShieldPhysics(bool isHost)
+    {
+        if (!isHost) return;
+        UpdatePlayerShield(ref _localShield,  _local!);
+        UpdatePlayerShield(ref _remoteShield, _remote!);
+    }
+
+    private void UpdatePlayerShield(ref PhysicsBody? shieldBody, HovercraftEntity player)
+    {
+        if (player.ShieldDeployed && player.IsAlive)
+        {
+            float len = GameConfig.Current.Ship.ShieldLength;
+            if (shieldBody == null)
+                shieldBody = _physics!.CreateShieldBody(player.Position, player.ShieldAngle, len);
+            else
+                _physics!.MoveShieldBody(shieldBody, player.Position);
+        }
+        else if (shieldBody != null)
+        {
+            _physics!.DestroyBody(shieldBody);
+            shieldBody = null;
+        }
+    }
+
     // ── Firing ─────────────────────────────────────────────────────────────────
 
     private void OnLocalFire(int id, Vector2 origin, Vector2 vel, WeaponType weaponType, int damage, int maxBounces)
@@ -532,7 +582,8 @@ public sealed class GameplayState : GameState
         WeaponType weaponType, int damage, int maxBounces)
     {
         if (_projectiles.ContainsKey((owner, id))) return;
-        var body = _physics!.CreateProjectile(origin, vel, null!);
+        bool hitsShields = weaponType == WeaponType.Laser || weaponType == WeaponType.LaserOrb;
+        var body = _physics!.CreateProjectile(origin, vel, null!, hitsShields);
         var proj = new ProjectileEntity(id, owner, isLocal, body, weaponType, damage, maxBounces);
         body.Data.Owner = proj;
         _projectiles[(owner, id)] = proj;
@@ -612,6 +663,13 @@ public sealed class GameplayState : GameState
                 break;
             }
 
+            case BuffPacket buff:
+            {
+                var buffTarget = buff.PlayerId == _local?.PlayerId ? _local : _remote;
+                buffTarget?.ApplyBuff((BuffType)buff.EffectType, buff.Duration);
+                break;
+            }
+
             case ScoreUpdatePacket score:
                 _objectives?.ApplyScore(score);
                 break;
@@ -639,6 +697,7 @@ public sealed class GameplayState : GameState
         // World — rendered through the camera transform
         sb.Begin(transformMatrix: _camera.Transform);
         _arena!.Draw(sb);
+        DrawShields(sb);
         _local!.Draw(sb);
         _remote!.Draw(sb);
         foreach (var p in _projectiles.Values)
@@ -673,6 +732,8 @@ public sealed class GameplayState : GameState
             _local.Health, 100, Color.LimeGreen, new Color(60, 20, 20));
         if (_local.HasDebuff(DebuffType.EmpSlow))
             UIRenderer.Text(sb, "EMP", new Vector2(226, 661), new Color(60, 210, 255), small: true);
+        if (_local.HasBuff(BuffType.DamageBoost))
+            UIRenderer.Text(sb, "DMG+", new Vector2(226, 648), new Color(255, 210, 60), small: true);
 
         // Remote player (bottom right)
         UIRenderer.Text(sb, isHost ? "Opponent" : "Host",
@@ -714,7 +775,7 @@ public sealed class GameplayState : GameState
         }
 
         // Controls hint (top left, small)
-        UIRenderer.Text(sb, "WASD move | LClick kinetic | Hold RClick laser | ESC quit",
+        UIRenderer.Text(sb, "WASD move | LClick kinetic | Hold RClick laser | E shield | ESC quit",
             new Vector2(20, 10), Color.DimGray, small: true);
 
         // Respawn countdown
@@ -754,6 +815,24 @@ public sealed class GameplayState : GameState
             UIRenderer.TextCentered(sb, "Press ESC to return to menu",
                 new Rectangle(0, 400, 1280, 40), Color.Gray, small: true);
         }
+    }
+
+    private void DrawShields(SpriteBatch sb)
+    {
+        DrawEntityShield(sb, _local!);
+        DrawEntityShield(sb, _remote!);
+    }
+
+    private static void DrawEntityShield(SpriteBatch sb, HovercraftEntity entity)
+    {
+        if (!entity.IsAlive || !entity.ShieldDeployed) return;
+        float len   = GameConfig.Current.Ship.ShieldLength;
+        var   pos   = entity.IsLocal ? entity.Position : entity.RemotePosition;
+        var   dx    = new Vector2(MathF.Cos(entity.ShieldAngle), MathF.Sin(entity.ShieldAngle));
+        var   p1    = pos - dx * (len / 2f);
+        var   p2    = pos + dx * (len / 2f);
+        DrawSegment(sb, p1, p2, Color.FromNonPremultiplied(100, 220, 255, 50), 10);
+        DrawSegment(sb, p1, p2, Color.FromNonPremultiplied(160, 235, 255, 200), 3);
     }
 
     private void DrawExplosions(SpriteBatch sb)

@@ -5,7 +5,7 @@ using B2Vec = System.Numerics.Vector2;
 
 namespace ScrubZone2D.Physics;
 
-public enum PhysicsTag { Wall, Hovercraft, Projectile }
+public enum PhysicsTag { Wall, Hovercraft, Projectile, Shield }
 
 public sealed class PhysicsBodyData
 {
@@ -105,7 +105,10 @@ public sealed class PhysicsWorld : IDisposable
             var dataB = GetData(B2.ShapeGetBody(evt.shapeIdB));
             if (dataA == null || dataB == null) continue;
 
-            if (dataA.Tag == PhysicsTag.Projectile && dataB.Tag == PhysicsTag.Wall)
+            bool aIsBarrier = dataA.Tag == PhysicsTag.Wall || dataA.Tag == PhysicsTag.Shield;
+            bool bIsBarrier = dataB.Tag == PhysicsTag.Wall || dataB.Tag == PhysicsTag.Shield;
+
+            if (dataA.Tag == PhysicsTag.Projectile && bIsBarrier)
             {
                 if (_bouncedThisStep.Add(dataA))
                 {
@@ -118,7 +121,7 @@ public sealed class PhysicsWorld : IDisposable
                     dataA.BounceCount++;
                 }
             }
-            else if (dataB.Tag == PhysicsTag.Projectile && dataA.Tag == PhysicsTag.Wall)
+            else if (dataB.Tag == PhysicsTag.Projectile && aIsBarrier)
             {
                 if (_bouncedThisStep.Add(dataB))
                 {
@@ -188,7 +191,7 @@ public sealed class PhysicsWorld : IDisposable
         return Register(bodyId, new PhysicsBodyData { Tag = PhysicsTag.Hovercraft, Owner = owner });
     }
 
-    public unsafe PhysicsBody CreateProjectile(XnaVec position, XnaVec velocityPx, object? owner)
+    public unsafe PhysicsBody CreateProjectile(XnaVec position, XnaVec velocityPx, object? owner, bool hitsShields = false)
     {
         var bd       = B2.DefaultBodyDef();
         bd.type      = B2.dynamicBody;
@@ -200,7 +203,9 @@ public sealed class PhysicsWorld : IDisposable
         sd.density               = 0.1f;
         sd.material.friction     = 0f;
         sd.material.restitution  = 0.95f;
-        sd.filter                = new B2.Filter { categoryBits = 0x0004, maskBits = 0x0001 }; // walls only
+        // Lasers hit walls (0x0001) + shields (0x0008); kinetics hit walls only
+        ushort mask              = hitsShields ? (ushort)0x0009 : (ushort)0x0001;
+        sd.filter                = new B2.Filter { categoryBits = 0x0004, maskBits = mask };
         sd.enableContactEvents   = true;
 
         var circle  = new B2.Circle { center = default, radius = ToM(5f) };
@@ -211,6 +216,31 @@ public sealed class PhysicsWorld : IDisposable
 
         B2.BodySetLinearVelocity(bodyId, V(ToB2(velocityPx)));
         return body;
+    }
+
+    public unsafe PhysicsBody CreateShieldBody(XnaVec center, float angle, float lengthPx)
+    {
+        var bd      = B2.DefaultBodyDef();
+        bd.type     = B2.staticBody;
+        bd.position = V(center);
+        var bodyId  = B2.CreateBody(_worldId, &bd);
+        B2.BodySetTransform(bodyId, V(center), B2.MakeRot(angle));
+
+        var sd = B2.DefaultShapeDef();
+        sd.material.friction    = 0f;
+        sd.material.restitution = 1.0f;
+        sd.filter               = new B2.Filter { categoryBits = 0x0008, maskBits = 0x0004 };
+        sd.enableContactEvents  = true;
+
+        var box     = B2.MakeBox(ToM(lengthPx / 2f), ToM(3f));
+        B2.CreatePolygonShape(bodyId, &sd, &box);
+        return Register(bodyId, new PhysicsBodyData { Tag = PhysicsTag.Shield });
+    }
+
+    public unsafe void MoveShieldBody(PhysicsBody body, XnaVec newCenter)
+    {
+        var rot = B2.BodyGetRotation(body.Id);
+        B2.BodySetTransform(body.Id, V(newCenter), rot);
     }
 
     public unsafe void DestroyBody(PhysicsBody body)

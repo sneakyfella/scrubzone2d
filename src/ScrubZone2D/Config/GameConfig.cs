@@ -14,8 +14,12 @@ public sealed class ShipConfig
     public int   MaxShield         { get; set; } = 75;
     public float ShieldRegenRate   { get; set; } = 20f;
     public float ShieldRegenDelay  { get; set; } = 3f;
-    public float EmpSlowFactor     { get; set; } = 0.2f;
-    public float EmpDebuffDuration { get; set; } = 4f;
+    public float EmpSlowFactor       { get; set; } = 0.2f;
+    public float EmpDebuffDuration   { get; set; } = 4f;
+    public float DamageBoostFactor   { get; set; } = 0.15f;
+    public float DamageBoostDuration { get; set; } = 5f;
+    public float ShieldLength        { get; set; } = 80f;
+    public float ShieldThicknessPx   { get; set; } = 6f;
 }
 
 public sealed class KineticConfig

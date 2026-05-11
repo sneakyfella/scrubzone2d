@@ -15,6 +15,7 @@ public static class GamePacketIds
     public const byte JoinerInput         = 0x57;
     public const byte ResumeCountdown     = 0x58;
     public const byte Debuff              = 0x59;
+    public const byte Buff                = 0x5A;
 }
 
 // Sent unreliably ~20 Hz — position/velocity/angles + shield for one hovercraft
@@ -30,6 +31,8 @@ public sealed class HovercraftStatePacket : IPacket
     public float  TurretAngle  { get; set; }
     public byte   Shield       { get; set; }
     public uint   Tick         { get; set; }
+    public bool   ShieldActive { get; set; }
+    public float  ShieldAngle  { get; set; }
 
     public void Serialize(BinaryWriter w)
     {
@@ -37,6 +40,7 @@ public sealed class HovercraftStatePacket : IPacket
         w.Write(VelX); w.Write(VelY);
         w.Write(BodyAngle); w.Write(TurretAngle);
         w.Write(Shield); w.Write(Tick);
+        w.Write(ShieldActive); w.Write(ShieldAngle);
     }
 
     public void Deserialize(BinaryReader r)
@@ -47,6 +51,7 @@ public sealed class HovercraftStatePacket : IPacket
         BodyAngle   = r.ReadSingle(); TurretAngle = r.ReadSingle();
         Shield      = r.ReadByte();
         Tick        = r.ReadUInt32();
+        ShieldActive = r.ReadBoolean(); ShieldAngle = r.ReadSingle();
     }
 }
 
@@ -145,20 +150,24 @@ public sealed class JoinerInputPacket : IPacket
     public float DirX       { get; set; }
     public float DirY       { get; set; }
     public float AimAngle   { get; set; }
-    public bool  RightHeld  { get; set; }
-    public float ChargeTime { get; set; }
+    public bool  RightHeld   { get; set; }
+    public float ChargeTime  { get; set; }
+    public bool  ShieldActive { get; set; }
+    public float ShieldAngle  { get; set; }
 
     public void Serialize(BinaryWriter w)
     {
         w.Write(DirX); w.Write(DirY); w.Write(AimAngle);
         w.Write(RightHeld); w.Write(ChargeTime);
+        w.Write(ShieldActive); w.Write(ShieldAngle);
     }
 
     public void Deserialize(BinaryReader r)
     {
         DirX = r.ReadSingle(); DirY = r.ReadSingle();
-        AimAngle   = r.ReadSingle();
-        RightHeld  = r.ReadBoolean(); ChargeTime = r.ReadSingle();
+        AimAngle    = r.ReadSingle();
+        RightHeld   = r.ReadBoolean(); ChargeTime = r.ReadSingle();
+        ShieldActive = r.ReadBoolean(); ShieldAngle = r.ReadSingle();
     }
 }
 
@@ -166,6 +175,18 @@ public sealed class JoinerInputPacket : IPacket
 public sealed class DebuffPacket : IPacket
 {
     public byte  PacketTypeId => GamePacketIds.Debuff;
+    public byte  PlayerId     { get; set; }
+    public byte  EffectType   { get; set; }
+    public float Duration     { get; set; }
+
+    public void Serialize(BinaryWriter w)   { w.Write(PlayerId); w.Write(EffectType); w.Write(Duration); }
+    public void Deserialize(BinaryReader r) { PlayerId = r.ReadByte(); EffectType = r.ReadByte(); Duration = r.ReadSingle(); }
+}
+
+// Sent reliably by host when a player receives a status buff
+public sealed class BuffPacket : IPacket
+{
+    public byte  PacketTypeId => GamePacketIds.Buff;
     public byte  PlayerId     { get; set; }
     public byte  EffectType   { get; set; }
     public float Duration     { get; set; }
@@ -197,5 +218,6 @@ public static class GamePacketRegistrar
         PacketRegistry.Register(GamePacketIds.JoinerInput,         () => new JoinerInputPacket());
         PacketRegistry.Register(GamePacketIds.ResumeCountdown,     () => new ResumeCountdownPacket());
         PacketRegistry.Register(GamePacketIds.Debuff,              () => new DebuffPacket());
+        PacketRegistry.Register(GamePacketIds.Buff,                () => new BuffPacket());
     }
 }
